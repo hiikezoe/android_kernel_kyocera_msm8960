@@ -21,8 +21,9 @@
 #include <linux/pm.h>
 #include <linux/cpu.h>
 #include <linux/interrupt.h>
-#include <linux/mfd/pmic8058.h>
-#include <linux/mfd/pmic8901.h>
+//#include <linux/mfd/pmic8058.h>
+//#include <linux/mfd/pmic8901.h>
+#include <linux/mfd/pm8xxx/pm8921.h>
 #include <linux/mfd/pm8xxx/misc.h>
 
 #include <asm/mach-types.h>
@@ -32,6 +33,7 @@
 #include <mach/socinfo.h>
 #include <mach/irqs.h>
 #include <mach/scm.h>
+#include <mach/oem_fact.h>
 #include "msm_watchdog.h"
 #include "timer.h"
 
@@ -83,7 +85,7 @@ static struct notifier_block panic_blk = {
 
 static void set_dload_mode(int on)
 {
-	if (dload_mode_addr) {
+	if ((dload_mode_addr) && !((restart_mode == RESTART_OEM) && (download_mode == 1))) {
 		__raw_writel(on ? 0xE47B337D : 0, dload_mode_addr);
 		__raw_writel(on ? 0xCE14091A : 0,
 		       dload_mode_addr + sizeof(unsigned int));
@@ -129,18 +131,57 @@ void msm_set_restart_mode(int mode)
 	if (download_mode == 1 && (mode & 0xFFFF0000) == 0x6D630000)
 		panic("LGE crash handler detected panic");
 #endif
+#ifdef CONFIG_MSM_DLOAD_MODE
+	if (mode == RESTART_DLOAD) {
+		download_mode = mode;
+	}
+#endif
 }
 EXPORT_SYMBOL(msm_set_restart_mode);
 
+static int force_restart = 0;
+module_param(force_restart, int, S_IRUGO | S_IWUSR);
+
+extern bool is_vbus_active(void);
+extern bool msm_is_pwroff_mode(void);
+extern void msm_set_pwroff_complete(void);
+extern void diag_end_sequence_output(void);
 static void __msm_power_off(int lower_pshold)
 {
+	bool pwroff_mode,vbus_monit;
+
 	printk(KERN_CRIT "Powering off the SoC\n");
 #ifdef CONFIG_MSM_DLOAD_MODE
 	set_dload_mode(0);
 #endif
 	pm8xxx_reset_pwr_off(0);
 
+	pwroff_mode = msm_is_pwroff_mode();
+	if (pwroff_mode == true	) {
+		pr_debug("diag_end_sequence_output()\n");
+		diag_end_sequence_output();
+		msm_set_pwroff_complete();
+		for (;;) {
+			vbus_monit = is_vbus_active();
+			if (vbus_monit==false){
+				break;
+			}
+			msleep(100);
+			pr_debug("Wait VBUS OFF!!!\n");
+		}
+	}
+
+	disable_irq(PM8921_PWRKEY_PRESS_IRQ);
+	disable_irq(PM8921_DCIN_VALID_IRQ);
+	disable_irq(PM8921_USBIN_VALID_IRQ);
+	disable_irq(PM8921_RTC_ALARM_IRQ);
+
 	if (lower_pshold) {
+		pr_info("checkpoint: lower pshold. shutdown end\n");
+		if (force_restart) {
+			pr_info("force restart for logging.\n");
+			pm8xxx_reset_pwr_off(1);
+		}
 		__raw_writel(0, PSHOLD_CTL_SU);
 		mdelay(10000);
 		printk(KERN_ERR "Powering off has failed\n");
@@ -182,9 +223,29 @@ static void cpu_power_off(void *data)
 		;
 }
 
+extern void set_smem_crash_system_unknown(void);
+extern void set_smem_crash_kind_wdog_hw(void);
+extern void set_smem_crash_info_data( const char *pdata );
+extern void set_kcj_crash_info(void);
 static irqreturn_t resout_irq_handler(int irq, void *dev_id)
 {
 	pr_warn("%s PMIC Initiated shutdown\n", __func__);
+
+	set_smem_crash_system_unknown();
+	set_smem_crash_kind_wdog_hw();
+	{
+		char buf[33];
+		memset( buf, '\0', sizeof(buf) );
+		snprintf( buf,
+		          sizeof(buf),
+		          "%x;%s",
+		          __LINE__,
+		          __func__
+		);
+		set_smem_crash_info_data( (const char *)buf );
+	}
+	set_kcj_crash_info();
+
 	oops_in_progress = 1;
 	smp_call_function_many(cpu_online_mask, cpu_power_off, NULL, 0);
 	if (smp_processor_id() == 0)
@@ -331,6 +392,7 @@ static int __init msm_restart_init(void)
 	lge_error_handler_cookie_addr = MSM_IMEM_BASE +
 		LGE_ERROR_HANDLER_MAGIC_ADDR;
 #endif
+	download_mode = oem_fact_get_option_bit(OEM_FACT_OPTION_ITEM_02, 0x00);
 	set_dload_mode(download_mode);
 #endif
 	msm_tmr0_base = msm_timer_get_timer0_base();

@@ -110,6 +110,31 @@ config TOUCHSCREEN_ATMEL_MXT
 	  To compile this driver as a module, choose M here: the
 	  module will be called atmel_mxt_ts.
 
+config TOUCHSCREEN_ATMEL_MXT_KC
+	tristate "Atmel maXTouch series touchscreen"
+	depends on I2C
+	help
+	  Say Y here if you have Atmel maXTouch series I2C touchscreen,
+	  such as mXT224S/mXT336S, connected to your system.
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called atmel_mxt_kc.
+
+config TOUCHSCREEN_PIXART_KC
+	tristate "PixArt touchscreen"
+	depends on I2C
+	help
+	  Say Y here if you have Atmel maXTouch series I2C touchscreen,
+	  such as mXT224S/mXT336S, connected to your system.
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called pixart.
+
+
 config TOUCHSCREEN_AUO_PIXCIR
 	tristate "AUO in-cell touchscreen using Pixcir ICs"
 	depends on I2C

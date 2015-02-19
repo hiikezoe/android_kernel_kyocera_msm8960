@@ -38,6 +38,11 @@ config ANDROID_RAM_CONSOLE
 	select ANDROID_PERSISTENT_RAM
 	default n
 
+config ANDROID_RAM_CONSOLE_SIZE
+	hex "Android RAM console buffer size"
+	default 0
+	depends on ANDROID_RAM_CONSOLE
+
 config PERSISTENT_TRACER
 	bool "Persistent function tracer"
 	depends on HAVE_FUNCTION_TRACER
@@ -86,6 +91,10 @@ config ANDROID_INTF_ALARM_DEV
 	  Provides non-wakeup and rtc backed wakeup alarms based on rtc or
 	  elapsed realtime, and a non-wakeup alarm on the monotonic clock.
 	  Also exports the alarm interface to user-space.
+
+config ANDROID_EXTENSION_RAM
+	tristate "Android extension ram log"
+	default y
 
 endif # if ANDROID
 

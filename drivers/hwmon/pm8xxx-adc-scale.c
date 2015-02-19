@@ -15,6 +15,7 @@
 #include <linux/err.h>
 #include <linux/module.h>
 #include <linux/mfd/pm8xxx/pm8xxx-adc.h>
+#include <../power/pm8921-charger_oem.h>
 #define KELVINMIL_DEGMIL	273160
 
 /* Units for temperature below (on x axis) is in 0.1DegC as
@@ -26,92 +27,44 @@
    their framework which is 0.1DegC. True resolution of 0.1DegC
    will result in the below table size to increase by 10 times */
 static const struct pm8xxx_adc_map_pt adcmap_btm_threshold[] = {
-	{-300,	1642},
-	{-200,	1544},
-	{-100,	1414},
-	{0,	1260},
-	{10,	1244},
-	{20,	1228},
-	{30,	1212},
-	{40,	1195},
-	{50,	1179},
-	{60,	1162},
-	{70,	1146},
-	{80,	1129},
-	{90,	1113},
-	{100,	1097},
-	{110,	1080},
-	{120,	1064},
-	{130,	1048},
-	{140,	1032},
-	{150,	1016},
-	{160,	1000},
-	{170,	985},
-	{180,	969},
-	{190,	954},
-	{200,	939},
-	{210,	924},
-	{220,	909},
-	{230,	894},
-	{240,	880},
-	{250,	866},
-	{260,	852},
-	{270,	838},
-	{280,	824},
-	{290,	811},
-	{300,	798},
-	{310,	785},
-	{320,	773},
-	{330,	760},
-	{340,	748},
-	{350,	736},
-	{360,	725},
-	{370,	713},
-	{380,	702},
-	{390,	691},
-	{400,	681},
-	{410,	670},
-	{420,	660},
-	{430,	650},
-	{440,	640},
+	{-400,	1764},
+	{-350,	1749},
+	{-300,	1729},
+	{-250,	1703},
+	{-200,	1669},
+	{-150,	1627},
+	{-100,	1575},
+	{-50,	1513},
+	{0,	1441},
+	{50,	1359},
+	{100,	1270},
+	{150,	1174},
+	{200,	1076},
+	{250,	978},
+	{300,	882},
+	{350,	791},
+	{400,	707},
 	{450,	631},
-	{460,	622},
-	{470,	613},
-	{480,	604},
-	{490,	595},
-	{500,	587},
-	{510,	579},
-	{520,	571},
-	{530,	563},
-	{540,	556},
-	{550,	548},
-	{560,	541},
-	{570,	534},
-	{580,	527},
-	{590,	521},
-	{600,	514},
-	{610,	508},
-	{620,	502},
-	{630,	496},
-	{640,	490},
-	{650,	485},
-	{660,	281},
-	{670,	274},
-	{680,	267},
-	{690,	260},
-	{700,	254},
-	{710,	247},
-	{720,	241},
-	{730,	235},
-	{740,	229},
-	{750,	224},
-	{760,	218},
-	{770,	213},
-	{780,	208},
-	{790,	203}
+	{500,	563},
+	{550,	503},
+	{600,	451},
+	{650,	406},
+	{700,	368},
+	{750,	335},
+	{800,	308},
+	{850,	284},
+	{900,	265},
+	{950,	248},
+	{1000,	234},
+	{1050,	222},
+	{1100,	212},
+	{1150,	203},
+	{1200,	196},
+	{1250,	92}
 };
 
 static const struct pm8xxx_adc_map_pt adcmap_pa_therm[] = {
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	{1731,	-30},
 	{1726,	-29},
 	{1721,	-28},
@@ -268,6 +221,42 @@ static const struct pm8xxx_adc_map_pt adcmap_pa_therm[] = {
 	{51,	123},
 	{50,	124},
 	{49,	125}
+#else
+   { 1760, -40 },
+   { 1743, -35 },
+   { 1722, -30 },
+   { 1693, -25 },
+   { 1656, -20 },
+   { 1610, -15 },
+   { 1553, -10 },
+   { 1485, -5 },
+   { 1406, 0 },
+   { 1316, 5 },
+   { 1218, 10 },
+   { 1114, 15 },
+   { 1007, 20 },
+   { 899, 25 },
+   { 795, 30 },
+   { 696, 35 },
+   { 605, 40 },
+   { 522, 45 },
+   { 448, 50 },
+   { 383, 55 },
+   { 327, 60 },
+   { 278, 65 },
+   { 237, 70 },
+   { 202, 75 },
+   { 172, 80 },
+   { 146, 85 },
+   { 125, 90 },
+   { 107, 95 },
+   { 92, 100 },
+   { 79, 105 },
+   { 68, 110 },
+   { 59, 115 },
+   { 51, 120 },
+   { 44, 125 }
+#endif
 };
 
 static const struct pm8xxx_adc_map_pt adcmap_ntcg_104ef_104fb[] = {
@@ -439,6 +428,43 @@ static const struct pm8xxx_adc_map_pt adcmap_ntcg_104ef_104fb[] = {
 	{419,		128000}
 };
 
+static const struct pm8xxx_adc_map_pt adcmap_camera_therm[] = {
+	{1792,	-40},
+	{1788,	-35},
+	{1784,	-30},
+	{1778,	-25},
+	{1769,	-20},
+	{1758,	-15},
+	{1745,	-10},
+	{1727,	-5},
+	{1705,	0},
+	{1677,	5},
+	{1643,	10},
+	{1603,	15},
+	{1555,	20},
+	{1500,	25},
+	{1437,	30},
+	{1367,	35},
+	{1291,	40},
+	{1209,	45},
+	{1123,	50},
+	{1036,	55},
+	{947,	60},
+	{861,	65},
+	{777,	70},
+	{697,	75},
+	{622,	80},
+	{553,	85},
+	{490,	90},
+	{433,	95},
+	{382,	100},
+	{336,	105},
+	{296,	110},
+	{260,	115},
+	{229,	120},
+	{202,	125}
+};
+
 static int32_t pm8xxx_adc_map_linear(const struct pm8xxx_adc_map_pt *pts,
 		uint32_t tablesize, int32_t input, int64_t *output)
 {
@@ -584,6 +610,71 @@ int32_t pm8xxx_adc_scale_default(int32_t adc_code,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(pm8xxx_adc_scale_default);
+
+
+#define	HKADC_VBATT_LVL_CAL_V_I_0	1100000
+#define	HKADC_VBATT_LVL_CAL_V_I_1	1400000
+#define	HKADC_VBATT_LVL_BASE_V_I_0	1100000
+#define	HKADC_VBATT_LVL_BASE_V_I_1	1400000
+extern int oem_option_item1_bit2;
+static void pm8xxx_adc_scale_2pc_vbat(struct pm8xxx_adc_chan_result *adc_chan_result)
+{
+	int64_t x1;
+	int64_t x2;
+	int64_t y1;
+	int64_t y2;
+	int64_t a;
+	int64_t b;
+	int64_t x;
+	int64_t y;
+
+	if (oem_option_item1_bit2) {
+		x1 = HKADC_VBATT_LVL_CAL_V_I_0;
+		x2 = HKADC_VBATT_LVL_CAL_V_I_1;
+	} else {
+		x1 = (int64_t)oem_param_hkadc.cal_vbat1;
+		x2 = (int64_t)oem_param_hkadc.cal_vbat2;
+	}
+
+	pr_debug("x1=%lld, x2=%lld\n",x1,x2);
+	y1 = HKADC_VBATT_LVL_BASE_V_I_0;
+	y2 = HKADC_VBATT_LVL_BASE_V_I_1;
+	/* a = (y2 - y1)*1000000 / (x2 - x1); */
+	a = (y2 - y1);
+	a *=1000000;
+	do_div(a,(x2 - x1));
+	b = (y1*1000000) - (a * x1);
+	x = adc_chan_result->measurement;
+	y = a * x + b;
+	y = (y+500000);
+	do_div(y,1000000);
+
+	adc_chan_result->measurement = y;
+	adc_chan_result->physical = adc_chan_result->measurement;
+
+	pr_debug("x=%lld, y=%lld",x,y);
+}
+
+int32_t pm8xxx_adc_scale_default_vbat(int32_t adc_code,
+		const struct pm8xxx_adc_properties *adc_properties,
+		const struct pm8xxx_adc_chan_properties *chan_properties,
+		struct pm8xxx_adc_chan_result *adc_chan_result)
+{
+
+	int rc;
+
+	rc = pm8xxx_adc_scale_default(adc_code,
+		adc_properties,
+		chan_properties,
+		adc_chan_result);
+
+	if (!rc){
+		pm8xxx_adc_scale_2pc_vbat(adc_chan_result);
+	}
+
+	return rc;
+}
+EXPORT_SYMBOL_GPL(pm8xxx_adc_scale_default_vbat);
 
 static int64_t pm8xxx_adc_scale_ratiometric_calib(int32_t adc_code,
 		const struct pm8xxx_adc_properties *adc_properties,
@@ -732,6 +823,24 @@ int32_t pm8xxx_adc_tdkntcg_therm(int32_t adc_code,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(pm8xxx_adc_tdkntcg_therm);
+
+int32_t pm8xxx_adc_scale_camera_therm(int32_t adc_code,
+		const struct pm8xxx_adc_properties *adc_properties,
+		const struct pm8xxx_adc_chan_properties *chan_properties,
+		struct pm8xxx_adc_chan_result *adc_chan_result)
+{
+	int64_t camera_voltage = 0;
+
+	camera_voltage = pm8xxx_adc_scale_ratiometric_calib(adc_code,
+			adc_properties, chan_properties);
+
+	return pm8xxx_adc_map_linear(
+			adcmap_camera_therm,
+			ARRAY_SIZE(adcmap_camera_therm),
+			camera_voltage,
+			&adc_chan_result->physical);
+}
+EXPORT_SYMBOL_GPL(pm8xxx_adc_scale_camera_therm);
 
 int32_t pm8xxx_adc_batt_scaler(struct pm8xxx_adc_arb_btm_param *btm_param,
 		const struct pm8xxx_adc_properties *adc_properties,

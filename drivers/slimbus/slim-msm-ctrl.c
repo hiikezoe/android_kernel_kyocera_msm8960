@@ -785,6 +785,21 @@ static int msm_send_msg_buf(struct slim_controller *ctrl, u32 *buf, u8 len)
 	return 0;
 }
 
+unsigned int msm_get_state(struct slim_controller *ctrl)
+{
+	unsigned int wake_state;
+	int msgv = -1;
+	struct msm_slim_ctrl *dev = slim_get_ctrldata(ctrl);
+
+	msgv = msm_slim_get_ctrl(dev);
+	wake_state = dev->state;
+
+	if (msgv >= 0)
+		msm_slim_put_ctrl(dev);
+
+	return wake_state;
+}
+
 static int msm_xfer_msg(struct slim_controller *ctrl, struct slim_msg_txn *txn)
 {
 	DECLARE_COMPLETION_ONSTACK(done);

@@ -184,7 +184,7 @@ __do_user_fault(struct task_struct *tsk, unsigned long addr,
 		printk(KERN_DEBUG "%s: unhandled page fault (%d) at 0x%08lx, code 0x%03x\n",
 		       tsk->comm, sig, addr, fsr);
 		show_pte(tsk->mm, addr);
-		show_regs(regs);
+		show_regs_user_fault(regs);
 	}
 #endif
 

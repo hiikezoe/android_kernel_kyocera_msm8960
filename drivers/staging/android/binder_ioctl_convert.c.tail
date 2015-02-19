@@ -1,0 +1,14 @@
+};
+const char *binder_get_ioctl_name(int cmd)
+{
+	int i;
+	const char *ioctl_name = NULL;
+
+	for (i=0; i<sizeof(binder_ioctl_cvttbl)/sizeof(struct binder_ioctl_cvt); i++) {
+		if(cmd == binder_ioctl_cvttbl[i].cmd) {
+			ioctl_name = binder_ioctl_cvttbl[i].cmdname;
+			break;
+		}
+	}
+	return ioctl_name;
+}

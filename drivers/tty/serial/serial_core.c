@@ -37,6 +37,35 @@
 #include <asm/irq.h>
 #include <asm/uaccess.h>
 
+#ifdef FEATURE_KC_UART_WRITE_SYNC2
+static const char device_name_hsl2[64] = {0x74, 0x74, 0x79, 0x48, 0x53, 0x4C, 0x32};
+extern volatile uart_trans_sync_c uart_trans_sync_hsl2;
+wait_queue_head_t uart_wait_hsl2;
+static struct timer_list fifocheck_timer_hsl2;
+static int sleep_checker_hsl2;
+#endif /* FEATURE_KC_UART_WRITE_SYNC2 */
+
+static const char device_name_hsl4[64] = {0x74, 0x74, 0x79, 0x48, 0x53, 0x4C, 0x34};
+#ifdef FEATURE_KC_UART_WRITE_SYNC4
+extern volatile uart_trans_sync_c uart_trans_sync_hsl4;
+wait_queue_head_t uart_wait_hsl4;
+static struct timer_list fifocheck_timer_hsl4;
+static int sleep_checker_hsl4;
+#endif /* FEATURE_KC_UART_WRITE_SYNC4 */
+
+#ifdef FEATURE_KC_UART_WRITE_SYNC
+#define UART_TRANS_SLEEPTIMER	(HZ * 4)
+#define UART_CHECK_TIMEOUT	(HZ * 1)
+#endif /* FEATURE_KC_UART_WRITE_SYNC */
+
+enum {
+	UART_CLOSE_ST,
+	UART_OPEN_ST,
+};
+unsigned int uart_open_status;
+
+pid_t	hsl4_pid;
+
 /*
  * This is used to lock changes in serial line configuration.
  */
@@ -62,6 +91,14 @@ static void uart_wait_until_sent(struct tty_struct *tty, int timeout);
 static void uart_change_pm(struct uart_state *state, int pm_state);
 
 static void uart_port_shutdown(struct tty_port *port);
+
+#ifdef FEATURE_KC_UART_WRITE_SYNC2
+static void fifocheck_timer_handler_hsl2( unsigned long data );
+#endif /* FEATURE_KC_UART_WRITE_SYNC2 */
+
+#ifdef FEATURE_KC_UART_WRITE_SYNC4
+static void fifocheck_timer_handler_hsl4( unsigned long data );
+#endif /* FEATURE_KC_UART_WRITE_SYNC4 */
 
 /*
  * This routine is used by the interrupt handler to schedule processing in
@@ -99,7 +136,22 @@ static void __uart_start(struct tty_struct *tty)
 
 	if (!uart_circ_empty(&state->xmit) && state->xmit.buf &&
 	    !tty->stopped && !tty->hw_stopped)
+	{
+#ifdef FEATURE_KC_UART_WRITE_SYNC2
+		if (strcmp(tty->name , device_name_hsl2) == 0)
+		{
+			uart_trans_sync_hsl2 = TRANS_ON;
+		}
+#endif /* FEATURE_KC_UART_WRITE_SYNC2 */
+#ifdef FEATURE_KC_UART_WRITE_SYNC4
+		if (strcmp(tty->name , device_name_hsl4) == 0)
+		{
+			uart_trans_sync_hsl4 = TRANS_ON;
+		}
+#endif /* FEATURE_KC_UART_WRITE_SYNC4 */
+
 		port->ops->start_tx(port);
+}
 }
 
 static void uart_start(struct tty_struct *tty)
@@ -495,6 +547,40 @@ static void uart_flush_chars(struct tty_struct *tty)
 	uart_start(tty);
 }
 
+#ifdef FEATURE_KC_UART_WRITE_SYNC2
+void uart_stop_tx_hsl2(void)
+{
+	if(sleep_checker_hsl2 == 1)
+	{
+		wake_up(&uart_wait_hsl2);
+	}
+}
+
+static void fifocheck_timer_handler_hsl2( unsigned long data )
+{
+	printk( KERN_ERR "Error [fifocheck_timer_handler_hsl2]old %ld, now %ld )\n", data, jiffies );
+
+	uart_trans_sync_hsl2 = TRANS_TIMEOUT;
+}
+#endif /* FEATURE_KC_UART_WRITE_SYNC2 */
+
+#ifdef FEATURE_KC_UART_WRITE_SYNC4
+void uart_stop_tx_hsl4(void)
+{
+	if(sleep_checker_hsl4 == 1)
+	{
+		wake_up(&uart_wait_hsl4);
+	}
+}
+
+static void fifocheck_timer_handler_hsl4( unsigned long data )
+{
+	printk( KERN_ERR "Error [fifocheck_timer_handler_hsl4]old %ld, now %ld )\n", data, jiffies );
+
+	uart_trans_sync_hsl4 = TRANS_TIMEOUT;
+}
+#endif /* FEATURE_KC_UART_WRITE_SYNC4 */
+
 static int uart_write(struct tty_struct *tty,
 					const unsigned char *buf, int count)
 {
@@ -503,6 +589,17 @@ static int uart_write(struct tty_struct *tty,
 	struct circ_buf *circ;
 	unsigned long flags;
 	int c, ret = 0;
+#ifdef FEATURE_KC_UART_WRITE_SYNC
+	unsigned int result;
+#endif /* FEATURE_KC_UART_WRITE_SYNC */
+#ifdef FEATURE_KC_UART_WRITE_SYNC2
+	int bit_count2 = 0;
+	int data_count2 = 0;
+#endif /* FEATURE_KC_UART_WRITE_SYNC2 */
+#ifdef FEATURE_KC_UART_WRITE_SYNC4
+	int bit_count4 = 0;
+	int data_count4 = 0;
+#endif /* FEATURE_KC_UART_WRITE_SYNC4 */
 
 	/*
 	 * This means you called this function _after_ the port was
@@ -535,6 +632,114 @@ static int uart_write(struct tty_struct *tty,
 	spin_unlock_irqrestore(&port->lock, flags);
 
 	uart_start(tty);
+
+#ifdef FEATURE_KC_UART_WRITE_SYNC2
+	if (strcmp(tty->name , device_name_hsl2) == 0)
+	{
+		bit_count2 = ret * 8;
+		data_count2 = tty->termios->c_ispeed / 100;
+
+		if ((bit_count2 > data_count2)&&(uart_trans_sync_hsl2 == TRANS_ON))
+		{
+			sleep_checker_hsl2 = 1;
+			sleep_on_timeout(&uart_wait_hsl2 , UART_TRANS_SLEEPTIMER);
+		}
+
+		init_timer( &fifocheck_timer_hsl2 );
+
+		fifocheck_timer_hsl2.expires  = jiffies + UART_CHECK_TIMEOUT;
+		fifocheck_timer_hsl2.data     = ( unsigned long )jiffies;
+		fifocheck_timer_hsl2.function = fifocheck_timer_handler_hsl2;
+		add_timer( &fifocheck_timer_hsl2 );
+
+		while (1)
+		{
+			switch (uart_trans_sync_hsl2)
+			{
+				case TRANS_OFF:
+					result = port->ops->tx_empty_hsl_k(port);
+					if (result == TIOCSER_TEMT)
+					{
+						del_timer_sync( &fifocheck_timer_hsl2 );
+						sleep_checker_hsl2 = 0;
+
+						return ret;
+					}
+					break ;
+				case TRANS_TIMEOUT:
+					printk(KERN_ERR "Error [uart_write]transfar is timeout\n");
+					del_timer_sync( &fifocheck_timer_hsl2 );
+					sleep_checker_hsl2 = 0;
+					ret = -EINTR;
+					return ret;
+				case TRANS_ON:
+				default :
+					if(sleep_checker_hsl2 == 1)
+					{
+						printk(KERN_ERR "Error [uart_write]msm_hs_stop_tx_locked function was not called\n");
+						del_timer_sync( &fifocheck_timer_hsl2 );
+						sleep_checker_hsl2 = 0;
+						ret = -EINTR;
+						return ret;
+					}
+			}
+		}
+	}
+#endif /* FEATURE_KC_UART_WRITE_SYNC2 */
+#ifdef FEATURE_KC_UART_WRITE_SYNC4
+	if (strcmp(tty->name , device_name_hsl4) == 0)
+	{
+		bit_count4 = ret * 8;
+		data_count4 = tty->termios->c_ispeed / 100;
+
+		if ((bit_count4 > data_count4)&&(uart_trans_sync_hsl4 == TRANS_ON))
+		{
+			sleep_checker_hsl4 = 1;
+			sleep_on_timeout(&uart_wait_hsl4 , UART_TRANS_SLEEPTIMER);
+		}
+
+		init_timer( &fifocheck_timer_hsl4 );
+
+		fifocheck_timer_hsl4.expires  = jiffies + UART_CHECK_TIMEOUT;
+		fifocheck_timer_hsl4.data     = ( unsigned long )jiffies;
+		fifocheck_timer_hsl4.function = fifocheck_timer_handler_hsl4;
+		add_timer( &fifocheck_timer_hsl4 );
+
+		while (1)
+		{
+			switch (uart_trans_sync_hsl4)
+			{
+				case TRANS_OFF:
+					result = port->ops->tx_empty_hsl_k(port);
+					if (result == TIOCSER_TEMT)
+					{
+						del_timer_sync( &fifocheck_timer_hsl4 );
+						sleep_checker_hsl4 = 0;
+
+						return ret;
+					}
+					break ;
+				case TRANS_TIMEOUT:
+					printk(KERN_ERR "Error [uart_write]transfar is timeout\n");
+					del_timer_sync( &fifocheck_timer_hsl4 );
+					sleep_checker_hsl4 = 0;
+					ret = -EINTR;
+					return ret;
+				case TRANS_ON:
+				default :
+					if(sleep_checker_hsl4 == 1)
+					{
+						printk(KERN_ERR "Error [uart_write]msm_hs_stop_tx_locked function was not called\n");
+						del_timer_sync( &fifocheck_timer_hsl4 );
+						sleep_checker_hsl4 = 0;
+						ret = -EINTR;
+						return ret;
+					}
+			}
+		}
+	}
+#endif /* FEATURE_KC_UART_WRITE_SYNC4 */
+
 	return ret;
 }
 
@@ -1258,9 +1463,32 @@ static void uart_close(struct tty_struct *tty, struct file *filp)
 	struct tty_port *port;
 	struct uart_port *uport;
 	unsigned long flags;
+	struct task_struct *uart_current;
 
 	if (!state)
 		return;
+
+	if (strcmp(tty->name , device_name_hsl4) == 0)
+	{
+		if (uart_open_status == UART_OPEN_ST)
+		{
+			uart_current = get_current();
+			if (hsl4_pid == uart_current->pid)
+			{
+				uart_open_status = UART_CLOSE_ST;
+			}
+			else
+			{
+				printk(KERN_ERR "Error [uart_close]Multi open status\n");
+				return;
+			}
+		}
+		else
+		{
+			printk(KERN_ERR "Error [uart_close]Calling not open\n");
+			return;
+		}
+	}
 
 	uport = state->uart_port;
 	port = &state->port;
@@ -1476,8 +1704,25 @@ static int uart_open(struct tty_struct *tty, struct file *filp)
 	int retval, line = tty->index;
 	struct uart_state *state = drv->state + line;
 	struct tty_port *port = &state->port;
+	struct task_struct *uart_current;
 
 	pr_debug("uart_open(%d) called\n", line);
+
+	if (strcmp(tty->name , device_name_hsl4) == 0)
+	{
+		if (uart_open_status == UART_CLOSE_ST)
+		{
+			uart_current = get_current();
+			hsl4_pid = uart_current->pid;
+			uart_open_status = UART_OPEN_ST;
+		}
+		else
+		{
+			retval = -EBUSY;
+			printk(KERN_ERR "Error [uart_open]Another user is using it \n");
+			return retval;
+		}
+	}
 
 	/*
 	 * We take the semaphore here to guarantee that we won't be re-entered
@@ -1531,7 +1776,26 @@ static int uart_open(struct tty_struct *tty, struct file *filp)
 	 */
 	mutex_unlock(&port->mutex);
 	if (retval == 0)
+	{
 		retval = tty_port_block_til_ready(port, tty, filp);
+		printk( KERN_INFO "[uart_open]name:%s\n", tty->name);
+#ifdef FEATURE_KC_UART_WRITE_SYNC2
+		if (strcmp(tty->name , device_name_hsl2) == 0)
+		{
+			uart_trans_sync_hsl2 = TRANS_OFF;
+			sleep_checker_hsl2 = 0;
+			init_waitqueue_head(&uart_wait_hsl2);
+		}
+#endif /* FEATURE_KC_UART_WRITE_SYNC2 */
+#ifdef FEATURE_KC_UART_WRITE_SYNC4
+		if (strcmp(tty->name , device_name_hsl4) == 0)
+		{
+			uart_trans_sync_hsl4 = TRANS_OFF;
+			sleep_checker_hsl4 = 0;
+			init_waitqueue_head(&uart_wait_hsl4);
+		}
+#endif /* FEATURE_KC_UART_WRITE_SYNC4 */
+	}
 
 end:
 	return retval;

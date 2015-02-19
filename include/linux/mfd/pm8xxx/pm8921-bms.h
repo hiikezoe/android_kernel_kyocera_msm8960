@@ -123,7 +123,11 @@ int pm8921_bms_get_battery_current(int *result);
  * pm8921_bms_get_percent_charge - returns the current battery charge in percent
  *
  */
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 int pm8921_bms_get_percent_charge(void);
+#else
+int pm8921_bms_get_percent_charge(int chg_state, int uim_valid);
+#endif
 
 /**
  * pm8921_bms_get_fcc - returns fcc in mAh of the battery depending on its age
@@ -189,6 +193,35 @@ void pm8921_bms_battery_removed(void);
  *			for reporting soc.
  */
 void pm8921_bms_battery_inserted(void);
+
+/**
+ * oem_pm8921_bms_change_table - replace the parameters of the bms
+ *
+ */
+void oem_pm8921_bms_change_table(void);
+
+/**
+ * oem_pm8921_bms_low_vol_detect_active - low-voltage detection in active
+ *
+ */
+void oem_pm8921_bms_low_vol_detect_active(int vbatt, int batt_temp, int init_state);
+
+/**
+ * oem_pm8921_bms_low_vol_detect_standby - low-voltage detection in standby
+ *
+ */
+void oem_pm8921_bms_low_vol_detect_standby(int batt_temp);
+
+/**
+ * oem_pm8921_bms_detected_low_vol - low-voltage detection in standby
+ *
+ */
+void oem_pm8921_bms_detected_low_vol(int vol_mv);
+
+int oem_pm8921_bms_get_chargecycles(void);
+
+int oem_pm8921_bms_get_deteriorationstatus(void);
+
 #else
 static inline int pm8921_bms_get_vsense_avg(int *result)
 {
@@ -198,7 +231,11 @@ static inline int pm8921_bms_get_battery_current(int *result)
 {
 	return -ENXIO;
 }
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 static inline int pm8921_bms_get_percent_charge(void)
+#else
+static inline int pm8921_bms_get_percent_charge(int chg_state)
+#endif
 {
 	return -ENXIO;
 }
@@ -237,6 +274,21 @@ static inline int pm8921_bms_get_current_max(void)
 }
 static inline void pm8921_bms_battery_removed(void) {}
 static inline void pm8921_bms_battery_inserted(void) {}
+static inline void oem_pm8921_bms_change_table(void)
+{
+}
+static inline void oem_pm8921_bms_low_vol_detect_active(int vbatt, int batt_temp, int init_state)
+{
+}
+static inline void oem_pm8921_bms_low_vol_detect_standby(int batt_temp)
+{
+}
+static inline void oem_pm8921_bms_detected_low_vol(int vol_mv)
+{
+}
+static int oem_pm8921_bms_get_chargecycles(void)
+{
+}
 #endif
 
 #endif

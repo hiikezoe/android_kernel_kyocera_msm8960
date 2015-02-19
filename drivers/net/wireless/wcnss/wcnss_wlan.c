@@ -34,6 +34,13 @@
 #include <linux/uaccess.h>
 
 #include <mach/peripheral-loader.h>
+/* 2013-02-21 For PA Failure Add Start */
+#include <mach/msm_smsm.h>
+
+#define KCC_SMEM_PA_FAILURE_DET_FLAG_SIZE	1
+
+static unsigned int pa_condition_flag = 0;
+/* 2013-02-21 For PA Failure Add End */
 #include <mach/msm_smd.h>
 #include <mach/msm_iomap.h>
 #include <linux/mfd/pm8xxx/misc.h>
@@ -122,6 +129,7 @@ static struct wcnss_pmic_dump wcnss_pmic_reg_dump[] = {
 };
 
 #define NVBIN_FILE "wlan/prima/WCNSS_qcom_wlan_nv.bin"
+#define NVBIN_FILE_DEFAULT "wlan/prima/WCNSS_qcom_wlan_nv_def.bin"
 
 /*
  * On SMD channel 4K of maximum data can be transferred, including message
@@ -255,6 +263,63 @@ static struct {
 	struct mutex dev_lock;
 	wait_queue_head_t read_wait;
 } *penv = NULL;
+
+/* 2013-02-21 For PA Failure Add Start */
+int wcnss_wlan_check_pa_failure(void)
+{
+	unsigned int *pa_ptr;
+
+	if (pa_condition_flag)
+		return 1;
+
+	pa_ptr = (unsigned int *)kc_smem_alloc(SMEM_PA_FAILURE_DET_FLAG,
+					KCC_SMEM_PA_FAILURE_DET_FLAG_SIZE);
+	if (!pa_ptr) {
+		printk(KERN_ERR "%s: kc_smem_alloc error\n", __func__);
+		return -1;
+	} else if (*pa_ptr) {
+		printk(KERN_ERR "%s: Find PA Failure\n", __func__);
+		return 1;
+	} else
+		return 0;
+}
+EXPORT_SYMBOL(wcnss_wlan_check_pa_failure);
+
+static ssize_t wcnss_pa_condition_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	if (!penv)
+		return -ENODEV;
+
+	if (wcnss_wlan_check_pa_failure())
+		return scnprintf(buf, PAGE_SIZE, "NG\n");
+	else
+		return scnprintf(buf, PAGE_SIZE, "OK\n");
+}
+
+static ssize_t wcnss_pa_condition_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	unsigned int value;
+
+	if (!penv)
+		return -ENODEV;
+
+	if (sscanf(buf, "%08X", &value) != 1)
+		return -EINVAL;
+
+	pa_condition_flag = value;
+
+	return count;
+}
+
+static DEVICE_ATTR(pa_condition,
+/* 2013-03-13 For CTS Fail Change Start */
+//	S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH,
+	S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH,
+/* 2013-03-13 For CTS Fail Change End */
+	wcnss_pa_condition_show, wcnss_pa_condition_store);
+/* 2013-02-21 For PA Failure Add End */
 
 static ssize_t wcnss_serial_number_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
@@ -403,12 +468,20 @@ static int wcnss_create_sysfs(struct device *dev)
 	if (ret)
 		goto remove_serial;
 
-	ret = device_create_file(dev, &dev_attr_wcnss_version);
+/* 2013-02-21 For PA Failure Add Start */
+        ret = device_create_file(dev, &dev_attr_pa_condition);
 	if (ret)
 		goto remove_thermal;
+/* 2013-02-21 For PA Failure Add End */
+
+	ret = device_create_file(dev, &dev_attr_wcnss_version);
+	if (ret)
+		goto remove_pa;
 
 	return 0;
 
+remove_pa:
+	device_remove_file(dev, &dev_attr_pa_condition);
 remove_thermal:
 	device_remove_file(dev, &dev_attr_thermal_mitigation);
 remove_serial:
@@ -422,6 +495,7 @@ static void wcnss_remove_sysfs(struct device *dev)
 	if (dev) {
 		device_remove_file(dev, &dev_attr_serial_number);
 		device_remove_file(dev, &dev_attr_thermal_mitigation);
+		device_remove_file(dev, &dev_attr_pa_condition);
 		device_remove_file(dev, &dev_attr_wcnss_version);
 	}
 }

@@ -10,6 +10,7 @@
  * GNU General Public License for more details.
  *
  */
+
 #ifndef __LINUX_MSM_CAMERA_H
 #define __LINUX_MSM_CAMERA_H
 
@@ -557,6 +558,7 @@ struct msm_camera_cfg_cmd {
 #define CMD_STATS_BHIST_BUF_RELEASE 58
 #define CMD_VFE_PIX_SOF_COUNT_UPDATE 59
 #define CMD_VFE_COUNT_PIX_SOF_ENABLE 60
+#define CMD_VFE_SET_FRAME_SKIP 61
 
 #define CMD_AXI_CFG_PRIM               BIT(8)
 #define CMD_AXI_CFG_PRIM_ALL_CHNLS     BIT(9)
@@ -1020,7 +1022,16 @@ struct msm_snapshot_pp_status {
 #define CFG_SET_VISION_AE             56
 #define CFG_HDR_UPDATE                57
 #define CFG_ACTUAOTOR_REG_INIT        58
-#define CFG_MAX                       59
+#define CFG_GET_EXP_TIME              59
+#define CFG_GET_IS_FLASH              60
+#define CFG_SET_NOTE_TAKEPIC          61
+#define CFG_SET_AF_MODE               62
+#define CFG_GET_LOW_LIGHT_INFO        63
+#define CFG_GET_LENS_POSITION         64
+#define CFG_MAX                       65
+
+#define MSM_V4L2_LENS_MACRO    0
+#define MSM_V4L2_LENS_INFINITY 1
 
 
 #define MOVE_NEAR	0
@@ -1305,6 +1316,10 @@ enum msm_sensor_resolution_t {
 	MSM_SENSOR_RES_5,
 	MSM_SENSOR_RES_6,
 	MSM_SENSOR_RES_7,
+	MSM_SENSOR_RES_8,
+	MSM_SENSOR_RES_9,
+	MSM_SENSOR_RES_10,
+	MSM_SENSOR_RES_11,
 	MSM_SENSOR_INVALID_RES,
 };
 
@@ -1579,6 +1594,7 @@ enum msm_camera_i2c_data_type {
 	MSM_CAMERA_I2C_SET_WORD_MASK,
 	MSM_CAMERA_I2C_UNSET_WORD_MASK,
 	MSM_CAMERA_I2C_SET_BYTE_WRITE_MASK_DATA,
+	MSM_CAMERA_I2C_BURST_DATA,
 };
 
 struct msm_camera_i2c_reg_setting {
@@ -1615,6 +1631,7 @@ struct camera_vreg_t {
 	int min_voltage;
 	int max_voltage;
 	int op_mode;
+	int lp_mode;
 	uint32_t delay;
 };
 
@@ -1678,6 +1695,9 @@ struct sensor_cfg_data {
 		int is_autoflash;
 		struct mirror_flip mirror_flip;
 		void *setting;
+		uint32_t exp_time;
+		int32_t lowlight_info;
+		uint8_t is_flash;
 		int32_t vision_mode_enable;
 		int32_t vision_ae;
 	} cfg;
@@ -1815,6 +1835,8 @@ struct msm_actuator_cfg_data {
 		struct msm_actuator_set_info_t set_info;
 		struct msm_actuator_get_info_t get_info;
 		enum af_camera_name cam_name;
+	    uint8_t mode;
+	    uint8_t lensposition;
 	} cfg;
 };
 

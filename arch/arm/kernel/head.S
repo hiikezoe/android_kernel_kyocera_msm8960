@@ -116,6 +116,13 @@ ENTRY(stext)
 	ldr	r8, =PHYS_OFFSET		@ always constant in this case
 #endif
 
+	ldr	r5, =sclk_at_entry
+	sub	r5, r5, #PAGE_OFFSET
+	add	r5, r5, r8
+	ldr	r6, =0x00200024			@ sclk
+	ldr	r4, [r6]
+	str	r4, [r5]
+
 	/*
 	 * r1 = machine no, r2 = atags or dtb,
 	 * r8 = phys_offset, r9 = cpuid, r10 = procinfo
@@ -150,6 +157,11 @@ ENDPROC(stext)
 2:	.long	.
 	.long	PAGE_OFFSET
 #endif
+	.pushsection	.init.data
+	.globl	sclk_at_entry
+sclk_at_entry:
+	.long	0
+	.popsection
 
 /*
  * Setup the initial page tables.  We only setup the barest

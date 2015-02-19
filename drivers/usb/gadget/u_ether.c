@@ -741,6 +741,7 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 
 	req->complete = tx_complete;
 
+#if 0
 	/* NCM requires no zlp if transfer is dwNtbInMaxSize */
 	if (dev->port_usb->is_fixed &&
 	    length == dev->port_usb->fixed_in_len &&
@@ -748,15 +749,22 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 		req->zero = 0;
 	else
 		req->zero = 1;
+#endif
 
 	/* use zlp framing on tx for strict CDC-Ether conformance,
 	 * though any robust network rx path ignores extra padding.
 	 * and some hardware doesn't like to write zlps.
 	 */
+#if 0
 	if (req->zero && !dev->zlp && (length % in->maxpacket) == 0) {
 		req->zero = 0;
 		length++;
 	}
+#else
+	req->zero = 1;
+	if (!dev->zlp && (length % in->maxpacket) == 0)
+		length++;
+#endif
 
 	req->length = length;
 

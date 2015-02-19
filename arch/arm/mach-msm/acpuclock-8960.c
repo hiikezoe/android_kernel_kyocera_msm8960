@@ -201,6 +201,30 @@ static struct pvs_table pvs_tables[NUM_SPEED_BINS][NUM_PVS] __initdata = {
 [0][PVS_FAST]    = { acpu_freq_tbl_fast, sizeof(acpu_freq_tbl_fast), 25000 },
 };
 
+static struct acpu_level acpu_freq_tbl_slow_charger[] __initdata = {
+	{ 1, {   384000, PLL_8, 0, 0x00 }, L2(0),   950000, AVS(0x40001F) },
+	{ 1, {   486000, HFPLL, 2, 0x24 }, L2(6),   975000 },
+	{ 0, { 0 } }
+};
+
+static struct acpu_level acpu_freq_tbl_nom_charger[] __initdata = {
+	{ 1, {   384000, PLL_8, 0, 0x00 }, L2(0),   900000, AVS(0x40007F) },
+	{ 1, {   486000, HFPLL, 2, 0x24 }, L2(6),   925000 },
+	{ 0, { 0 } }
+};
+
+static struct acpu_level acpu_freq_tbl_fast_charger[] __initdata = {
+	{ 1, {   384000, PLL_8, 0, 0x00 }, L2(0),   850000, AVS(0x4000FF) },
+	{ 1, {   486000, HFPLL, 2, 0x24 }, L2(6),   875000 },
+	{ 0, { 0 } }
+};
+
+static struct pvs_table pvs_tables_charger[NUM_SPEED_BINS][NUM_PVS] __initdata = {
+[0][PVS_SLOW]    = { acpu_freq_tbl_slow_charger, sizeof(acpu_freq_tbl_slow_charger),     0 },
+[0][PVS_NOMINAL] = { acpu_freq_tbl_nom_charger,  sizeof(acpu_freq_tbl_nom_charger),  25000 },
+[0][PVS_FAST]    = { acpu_freq_tbl_fast_charger, sizeof(acpu_freq_tbl_fast_charger), 25000 },
+};
+
 static struct acpuclk_krait_params acpuclk_8960_params __initdata = {
 	.scalable = scalable,
 	.scalable_size = sizeof(scalable),
@@ -213,9 +237,32 @@ static struct acpuclk_krait_params acpuclk_8960_params __initdata = {
 	.stby_khz = 384000,
 };
 
+static struct acpuclk_krait_params acpuclk_8960_params_charger_mode __initdata = {
+	.scalable = scalable,
+	.scalable_size = sizeof(scalable),
+	.hfpll_data = &hfpll_data,
+	.pvs_tables = pvs_tables_charger,
+	.l2_freq_tbl = l2_freq_tbl,
+	.l2_freq_tbl_size = sizeof(l2_freq_tbl),
+	.bus_scale = &bus_scale_data,
+	.pte_efuse_phys = 0x007000C0,
+	.stby_khz = 384000,
+};
+
+static int 	boot_mode_charger = 0;
+static int __init bootmode(char *str)
+{
+	if(str!=NULL){
+		if(strcmp(str,"charger")==0){
+			boot_mode_charger = 1;
+		}
+	}
+	return 0;
+}
+early_param("androidboot.mode",bootmode);
 static int __init acpuclk_8960_probe(struct platform_device *pdev)
 {
-	return acpuclk_krait_init(&pdev->dev, &acpuclk_8960_params);
+	return acpuclk_krait_init(&pdev->dev, boot_mode_charger?(&acpuclk_8960_params_charger_mode):(&acpuclk_8960_params));
 }
 
 static struct platform_driver acpuclk_8960_driver = {

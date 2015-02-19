@@ -1,0 +1,21 @@
+--- drivers/power/pm8921-bms.c
++++ drivers/power/pm8921-bms.c
+@@ -2867,13 +3320,23 @@
+ 	}
+ 
+ 	/* last_soc < soc  ... scale and catch up */
+-	if (last_soc != -EINVAL && last_soc < soc && soc != 100
+-				&& chip->catch_up_time_us != 0)
+-		soc = scale_soc_while_chg(chip, delta_time_us, soc, last_soc);
++	if (last_soc != -EINVAL && last_soc < soc && soc != 100)
++			soc = scale_soc_while_chg(chip, delta_time_us,
++							soc, last_soc);
++
++	/* restrict soc to 1% change */
++	if (last_soc != -EINVAL) {
++		if (soc < last_soc && soc != 0)
++			soc = last_soc - 1;
++		if (soc > last_soc && soc != 100)
++			soc = last_soc + 1;
++	}
+ 

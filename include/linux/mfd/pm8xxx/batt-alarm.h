@@ -162,6 +162,19 @@ int pm8xxx_batt_alarm_hold_time_set(enum pm8xxx_batt_alarm_hold_time hold_time);
  */
 int pm8xxx_batt_alarm_pwm_rate_set(int use_pwm, int clock_scaler,
 				   int clock_divider);
+
+/**
+ * oem_pm8xxx_batt_alarm_threshold_update - update the threshold of battery alarm
+ *
+ */
+int oem_pm8xxx_batt_alarm_threshold_update(int threshold_low_vol);
+
+/**
+ * oem_pm8xxx_batt_alarm_get_threshold - to get threshold
+ *
+ */
+int oem_pm8xxx_batt_alarm_get_threshold(void);
+
 #else
 
 static inline int
@@ -193,6 +206,12 @@ pm8xxx_batt_alarm_hold_time_set(enum pm8xxx_batt_alarm_hold_time hold_time)
 
 static inline int
 pm8xxx_batt_alarm_pwm_rate_set(int use_pwm, int clock_scaler, int clock_divider)
+{ return -ENODEV; }
+
+static inline int oem_pm8xxx_batt_alarm_threshold_update(int threshold_low_vol)
+{ return -ENODEV; }
+
+static inline int oem_pm8xxx_batt_alarm_get_threshold(void)
 { return -ENODEV; }
 
 #endif

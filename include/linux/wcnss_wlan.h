@@ -29,6 +29,10 @@ struct wcnss_wlan_config {
 #define HAVE_WCNSS_RESET_INTR 1
 #define HAVE_WCNSS_CAL_DOWNLOAD 1
 
+/* 2013-02-21 For PA Failure Add Start */
+int wcnss_wlan_check_pa_failure(void);
+/* 2013-02-21 For PA Failure Add End */
+
 struct device *wcnss_wlan_get_device(void);
 struct resource *wcnss_wlan_get_memory_map(struct device *dev);
 int wcnss_wlan_get_dxe_tx_irq(struct device *dev);

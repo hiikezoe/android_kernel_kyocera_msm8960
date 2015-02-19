@@ -1,0 +1,19 @@
+--- drivers/net/wireless/wcnss/wcnss_wlan.c
++++ drivers/net/wireless/wcnss/wcnss_wlan.c
+@@ -855,10 +929,15 @@
+ 	ret = request_firmware(&nv, NVBIN_FILE, dev);
+ 
+ 	if (ret || !nv || !nv->data || !nv->size) {
++		pr_err("wcnss: wcnss_nvbin_dnld_req: request_firmware failed for %s. try %s\n",
++			NVBIN_FILE, NVBIN_FILE_DEFAULT);
++		ret = request_firmware(&nv, NVBIN_FILE_DEFAULT, dev);
++		if (ret || !nv || !nv->data || !nv->size) {
+ 		pr_err("wcnss: wcnss_nvbin_dnld_req: request_firmware failed for %s\n",
+-			NVBIN_FILE);
++				NVBIN_FILE_DEFAULT);
+ 		return;
+ 	}
++	}
+ 
+ 	/*
+ 	 * First 4 bytes in nv blob is validity bitmap.

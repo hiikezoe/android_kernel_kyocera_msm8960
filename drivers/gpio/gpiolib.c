@@ -1763,6 +1763,25 @@ static void gpiolib_dbg_show(struct seq_file *s, struct gpio_chip *chip)
 	}
 }
 
+static void kc_gpiolib_dbg_show(struct seq_file *s, struct gpio_chip *chip)
+{
+	unsigned		i;
+	unsigned		gpio = chip->base;
+	struct gpio_desc	*gdesc = &gpio_desc[gpio];
+	int			is_out;
+
+	for (i = 0; i < chip->ngpio; i++, gpio++, gdesc++) {
+
+		is_out = test_bit(FLAG_IS_OUT, &gdesc->flags);
+		printk( KERN_ERR " gpio-%-3d (%-20.20s) %s %s\n",
+			gpio, gdesc->label,
+			is_out ? "out" : "in ",
+			chip->get
+				? (chip->get(chip, i) ? "hi" : "lo")
+				: "?  ");
+	}
+}
+
 static int gpiolib_show(struct seq_file *s, void *unused)
 {
 	struct gpio_chip	*chip = NULL;
@@ -1802,6 +1821,66 @@ static int gpiolib_show(struct seq_file *s, void *unused)
 	}
 	return 0;
 }
+
+void kc_gpio_debug_print_enabled(void)
+{
+	struct gpio_chip	*chip = NULL;
+	unsigned		gpio;
+	int			started = 0;
+	struct seq_file s_temp;
+	struct seq_file *s;
+	char gpio_debug_alloc_buffer[900];
+
+	s_temp.count = 0;
+	s_temp.size = 900;
+	memset(gpio_debug_alloc_buffer, 0, sizeof(gpio_debug_alloc_buffer));
+	s_temp.buf = &gpio_debug_alloc_buffer[0];
+	if (!s_temp.buf)
+		return;
+	s = &s_temp;
+
+	/* REVISIT this isn't locked against gpio_chip removal ... */
+
+	for (gpio = 0; gpio_is_valid(gpio); gpio++) {
+		struct device *dev;
+
+		if (chip == gpio_desc[gpio].chip)
+			continue;
+		chip = gpio_desc[gpio].chip;
+		if (!chip)
+			continue;
+
+		seq_printf(s, "%sGPIOs %d-%d",
+				started ? "\n" : "",
+				chip->base, chip->base + chip->ngpio - 1);
+		dev = chip->dev;
+		if (dev)
+			seq_printf(s, ", %s/%s",
+				dev->bus ? dev->bus->name : "no-bus",
+				dev_name(dev));
+		if (chip->label)
+			seq_printf(s, ", %s", chip->label);
+		if (chip->can_sleep)
+			seq_printf(s, ", can sleep");
+		seq_printf(s, ":\n");
+
+		printk( KERN_ERR "%s", s_temp.buf);
+		memset(gpio_debug_alloc_buffer, 0, sizeof(gpio_debug_alloc_buffer));
+		s_temp.count = 0;
+
+		started = 1;
+		if (chip->dbg_show)
+			chip->dbg_show(s, chip);
+		else
+			kc_gpiolib_dbg_show(s, chip);
+		printk( KERN_ERR "%s", s_temp.buf);
+		memset(gpio_debug_alloc_buffer, 0, sizeof(gpio_debug_alloc_buffer));
+		s_temp.count = 0;
+		return;
+	}
+	return;
+}
+EXPORT_SYMBOL_GPL(kc_gpio_debug_print_enabled);
 
 static int gpiolib_open(struct inode *inode, struct file *file)
 {

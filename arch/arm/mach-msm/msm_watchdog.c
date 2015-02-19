@@ -119,6 +119,8 @@ void msm_wdog_bark_fin(void)
 	panic("Apps Watchdog Bark received\n");
 }
 
+extern void set_kcj_pet_time(void);
+
 static int msm_watchdog_suspend(struct device *dev)
 {
 	if (!enable)
@@ -127,6 +129,7 @@ static int msm_watchdog_suspend(struct device *dev)
 	__raw_writel(1, msm_wdt_base + WDT_RST);
 	__raw_writel(0, msm_wdt_base + WDT_EN);
 	mb();
+	set_kcj_pet_time();
 	return 0;
 }
 
@@ -138,6 +141,7 @@ static int msm_watchdog_resume(struct device *dev)
 	__raw_writel(1, msm_wdt_base + WDT_EN);
 	__raw_writel(1, msm_wdt_base + WDT_RST);
 	mb();
+	set_kcj_pet_time();
 	return 0;
 }
 
@@ -249,6 +253,7 @@ done:
 unsigned min_slack_ticks = UINT_MAX;
 unsigned long long min_slack_ns = ULLONG_MAX;
 
+extern void extension_ram_log_00(char *client_data);
 void pet_watchdog(void)
 {
 	int slack;
@@ -269,6 +274,8 @@ void pet_watchdog(void)
 	if (slack_ns < min_slack_ns)
 		min_slack_ns = slack_ns;
 	last_pet = time_ns;
+	extension_ram_log_00("pet apps watchdog");
+	set_kcj_pet_time();
 }
 
 static void pet_watchdog_work(struct work_struct *work)
@@ -279,6 +286,9 @@ static void pet_watchdog_work(struct work_struct *work)
 		schedule_delayed_work_on(0, &dogwork_struct, delay_time);
 }
 
+extern void set_smem_crash_kind_wdog_hw(void);
+extern void set_smem_crash_system_kernel(void);
+extern void set_smem_crash_info_data( const char *pdata );
 static irqreturn_t wdog_bark_handler(int irq, void *dev_id)
 {
 	unsigned long nanosec_rem;
@@ -309,12 +319,27 @@ static irqreturn_t wdog_bark_handler(int irq, void *dev_id)
 		msm_watchdog_resume(NULL);
 	}
 
+	set_smem_crash_system_kernel();
+	set_smem_crash_kind_wdog_hw();
+	{
+		char buf[33];
+		memset( buf, '\0', sizeof(buf) );
+		snprintf( buf,
+		          sizeof(buf),
+		          "%x;%s",
+		          __LINE__,
+		          __func__
+		);
+		set_smem_crash_info_data( (const char *)buf );
+	}
+
 	panic("Apps watchdog bark received!");
 	return IRQ_HANDLED;
 }
 
 #define SCM_SET_REGSAVE_CMD 0x2
 
+extern void set_kcj_regsave_addr(unsigned long regsave_addr);
 static void configure_bark_dump(void)
 {
 	int ret;
@@ -329,6 +354,7 @@ static void configure_bark_dump(void)
 		if (scm_regsave) {
 			cmd_buf.addr = __pa(scm_regsave);
 			cmd_buf.len  = PAGE_SIZE;
+			set_kcj_regsave_addr((unsigned long)cmd_buf.addr);
 
 			ret = scm_call(SCM_SVC_UTIL, SCM_SET_REGSAVE_CMD,
 				       &cmd_buf, sizeof(cmd_buf), NULL, 0);
@@ -409,6 +435,7 @@ static void init_watchdog_work(struct work_struct *work)
 	__raw_writel(1, msm_wdt_base + WDT_EN);
 	__raw_writel(1, msm_wdt_base + WDT_RST);
 	last_pet = sched_clock();
+	set_kcj_pet_time();
 
 	if (!has_vic)
 		enable_percpu_irq(msm_wdog_irq, IRQ_TYPE_EDGE_RISING);

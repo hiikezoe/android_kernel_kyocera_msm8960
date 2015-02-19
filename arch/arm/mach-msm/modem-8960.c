@@ -39,6 +39,10 @@ static struct subsys_device *modem_8960_dev;
 
 #define MAX_SSR_REASON_LEN 81U
 
+extern void set_smem_crash_system_modem(void);
+extern void set_smem_crash_kind_wdog_hw(void);
+extern void set_smem_crash_info_data( const char *pdata );
+
 static void log_modem_sfr(void)
 {
 	u32 size;
@@ -66,7 +70,7 @@ static void log_modem_sfr(void)
 static void restart_modem(void)
 {
 	log_modem_sfr();
-	subsystem_restart_dev(modem_8960_dev);
+	panic("modem_8960: Resetting the SoC");
 }
 
 static void smsm_state_cb(void *data, uint32_t old_state, uint32_t new_state)
@@ -193,10 +197,36 @@ static irqreturn_t modem_wdog_bite_irq(int irq, void *dev_id)
 
 	case Q6SW_WDOG_EXPIRED_IRQ:
 		pr_err("Watchdog bite received from modem software!\n");
+		set_smem_crash_system_modem();
+		set_smem_crash_kind_wdog_hw();
+		{
+			char buf[33];
+			memset( buf, '\0', sizeof(buf) );
+			snprintf( buf,
+			          sizeof(buf),
+			          "%x;%s",
+			          __LINE__,
+			          __func__
+			);
+			set_smem_crash_info_data( (const char *)buf );
+		}
 		restart_modem();
 		break;
 	case Q6FW_WDOG_EXPIRED_IRQ:
 		pr_err("Watchdog bite received from modem firmware!\n");
+		set_smem_crash_system_modem();
+		set_smem_crash_kind_wdog_hw();
+		{
+			char buf[33];
+			memset( buf, '\0', sizeof(buf) );
+			snprintf( buf,
+			          sizeof(buf),
+			          "%x;%s",
+			          __LINE__,
+			          __func__
+			);
+			set_smem_crash_info_data( (const char *)buf );
+		}
 		restart_modem();
 		break;
 	break;

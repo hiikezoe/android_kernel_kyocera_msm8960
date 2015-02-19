@@ -95,6 +95,8 @@ int32_t msm_sensor_setting(struct msm_sensor_ctrl_t *s_ctrl,
 int32_t msm_sensor_setting1(struct msm_sensor_ctrl_t *s_ctrl,
 			int update_type, int res);
 
+int32_t msm_sensor_evt_notify(struct msm_sensor_ctrl_t *s_ctrl, uint8_t msg_id);
+
 int msm_sensor_enable_debugfs(struct msm_sensor_ctrl_t *s_ctrl);
 
 long msm_sensor_subdev_ioctl(struct v4l2_subdev *sd,

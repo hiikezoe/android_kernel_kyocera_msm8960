@@ -41,7 +41,7 @@
 #include "mdp.h"
 #include "msm_fb.h"
 #include "mdp4.h"
-
+#include "external_common.h"
 #define VERSION_KEY_MASK	0xFFFFFF00
 
 struct mdp4_overlay_ctrl {
@@ -133,8 +133,10 @@ void  mdp4_overlay_free_base_pipe(struct msm_fb_data_type *mfd)
 			mdp4_dsi_cmd_free_base_pipe(mfd);
 		else if (ctrl->panel_mode & MDP4_PANEL_LCDC)
 			mdp4_lcdc_free_base_pipe(mfd);
+#ifdef CONFIG_FB_MSM_DTV
 	} else if (hdmi_prim_display || mfd->index == 1) {
 		mdp4_dtv_free_base_pipe(mfd);
+#endif
 	}
 }
 
@@ -478,6 +480,9 @@ void mdp4_overlay_dmae_cfg(struct msm_fb_data_type *mfd, int atv)
 		MDP_OUTP(MDP_BASE + 0xb3014, 0x1000080);
 		MDP_OUTP(MDP_BASE + 0xb4004, 0x67686970);
 	} else {
+#ifdef CONFIG_FB_MSM_HDMI_COMMON
+		hdmi_common_get_video_format_from_drv_data(mfd);
+#endif /* CONFIG_FB_MSM_HDMI_COMMON */
 		mdp_vid_quant_set();
 	}
 
@@ -3474,6 +3479,14 @@ int mdp4_overlay_set(struct fb_info *info, struct mdp_overlay *req)
 	}
 
 	mixer = mfd->panel_info.pdest;	/* DISPLAY_1 or DISPLAY_2 */
+
+	ret = mdp4_calc_req_blt(mfd, req);
+
+	if (ret < 0) {
+		mutex_unlock(&mfd->dma->ov_mutex);
+		pr_err("%s: blt mode is required! ret=%d\n", __func__, ret);
+		return ret;
+	}
 
 	ret = mdp4_calc_req_blt(mfd, req);
 

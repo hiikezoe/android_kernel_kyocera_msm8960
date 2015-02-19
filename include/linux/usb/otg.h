@@ -312,4 +312,14 @@ usb_unregister_notifier(struct usb_phy *x, struct notifier_block *nb)
 /* for OTG controller drivers (and maybe other stuff) */
 extern int usb_bus_start_enum(struct usb_bus *bus, unsigned port_num);
 
+typedef void (*usb_mhl_event_func)(int usb_mhlinfo);
+
+struct usb_mhl_event_callback {
+	usb_mhl_event_func fn;
+};
+
+extern int32_t usb_mhl_reg_cbfunc(struct usb_mhl_event_callback* cb);
+extern int32_t usb_mhl_unreg_cbfunc(struct usb_mhl_event_callback* cb);
+
+
 #endif /* __LINUX_USB_OTG_H */

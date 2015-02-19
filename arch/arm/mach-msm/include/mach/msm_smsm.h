@@ -241,6 +241,24 @@ enum {
 	SMEM_SSR_REASON_VCODEC0,
 	SMEM_MEM_LAST = SMEM_SSR_REASON_VCODEC0,
 	SMEM_NUM_ITEMS,
+
+	SMEM_KCC_BASE         = 430,
+	SMEM_KERR_LOG         = SMEM_KCC_BASE + 1,
+	SMEM_SBL3_BOOTVER     = SMEM_KCC_BASE + 2,
+	SMEM_SBL3_DNAND_DATA  = SMEM_KCC_BASE + 3,
+	SMEM_DDR_DATA_INFO    = SMEM_KCC_BASE + 4,
+	SMEM_KC_WM_UUID       = SMEM_KCC_BASE + 5,
+	SMEM_FACTORY_CMDLINE  = SMEM_KCC_BASE + 6,
+	SMEM_FACTORY_USB      = SMEM_KCC_BASE + 7,
+	SMEM_CRASH_LOG        = SMEM_KCC_BASE + 8,
+	SMEM_FACTORY_OPTIONS  = SMEM_KCC_BASE + 9,
+	SMEM_CHG_PARAM        = SMEM_KCC_BASE + 10,
+	SMEM_UICC_INFO        = SMEM_KCC_BASE + 11,
+	SMEM_LINUXSDDL_FLAG   = SMEM_KCC_BASE + 12,
+	SMEM_SECUREBOOT_FLAG  = SMEM_KCC_BASE + 13,
+	SMEM_OEM_MODEM_KEEPALIVE  = SMEM_KCC_BASE + 14,
+	SMEM_PA_FAILURE_DET_FLAG  = SMEM_KCC_BASE + 15,
+
 };
 
 enum {
@@ -252,5 +270,7 @@ enum {
 int smsm_check_for_modem_crash(void);
 void *smem_find(unsigned id, unsigned size);
 void *smem_get_entry(unsigned id, unsigned *size);
+
+void *kc_smem_alloc(unsigned id, unsigned buf_size);
 
 #endif

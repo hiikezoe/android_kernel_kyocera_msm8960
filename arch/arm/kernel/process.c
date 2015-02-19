@@ -327,9 +327,29 @@ void machine_power_off(void)
 		pm_power_off();
 }
 
+extern void set_smem_crash_system_kernel(void);
+extern void set_smem_crash_system_android(void);
+extern void set_smem_crash_kind_panic(void);
+extern void set_smem_crash_kind_android(void);
+extern void set_smem_crash_info_data( const char *pdata );
+extern void set_kcj_crash_info(void);
+
 void machine_restart(char *cmd)
 {
 	machine_shutdown();
+
+	if (cmd != NULL) {
+		if (strcmp(cmd, "kernel_panic") == 0) {
+			set_smem_crash_system_kernel();
+			set_smem_crash_kind_panic();
+			set_smem_crash_info_data( " " );
+		} else if (strcmp(cmd, "system_server_crash") == 0) {
+			set_smem_crash_system_android();
+			set_smem_crash_kind_android();
+			set_smem_crash_info_data( " " );
+		}
+	}
+	set_kcj_crash_info();
 
 	/* Flush the console to make sure all the relevant messages make it
 	 * out to the console drivers */
@@ -416,7 +436,7 @@ static void show_extra_register_data(struct pt_regs *regs, int nbytes)
 	set_fs(fs);
 }
 
-void __show_regs(struct pt_regs *regs)
+static void show_register(struct pt_regs *regs)
 {
 	unsigned long flags;
 	char buf[64];
@@ -495,15 +515,34 @@ void __show_regs(struct pt_regs *regs)
 #endif
 	}
 #endif
+}
 
+void __show_regs(struct pt_regs *regs)
+{
+	show_register(regs);
 	show_extra_register_data(regs, 128);
+}
+
+static void show_pid_comm(void)
+{
+	struct task_struct *tsk = current;
+
+	printk("\n");
+	if (tsk != NULL)
+		printk("Pid: %d, comm: %20s\n", task_pid_nr(tsk), tsk->comm);
 }
 
 void show_regs(struct pt_regs * regs)
 {
-	printk("\n");
-	printk("Pid: %d, comm: %20s\n", task_pid_nr(current), current->comm);
+	show_pid_comm();
 	__show_regs(regs);
+	dump_stack();
+}
+
+void show_regs_user_fault(struct pt_regs * regs)
+{
+	show_pid_comm();
+	show_register(regs);
 	dump_stack();
 }
 

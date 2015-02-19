@@ -116,9 +116,9 @@ static int pil_q6v4_power_up(struct device *dev)
 	int err;
 	struct q6v4_data *drv = dev_get_drvdata(dev);
 
-	err = regulator_set_voltage(drv->vreg, 743750, 743750);
+	err = regulator_set_voltage(drv->vreg, 1050000, 1050000);
 	if (err) {
-		dev_err(dev, "Failed to set regulator's voltage step.\n");
+		dev_err(dev, "Failed to set regulator's voltage.\n");
 		return err;
 	}
 	err = regulator_enable(drv->vreg);
@@ -133,11 +133,6 @@ static int pil_q6v4_power_up(struct device *dev)
 	 */
 	udelay(100);
 
-	err = regulator_set_voltage(drv->vreg, 1050000, 1050000);
-	if (err) {
-		dev_err(dev, "Failed to set regulator's voltage.\n");
-		return err;
-	}
 	drv->vreg_enabled = true;
 	return 0;
 }

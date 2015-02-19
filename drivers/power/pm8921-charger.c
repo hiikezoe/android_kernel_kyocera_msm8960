@@ -30,9 +30,19 @@
 #include <linux/slab.h>
 #include <linux/mfd/pm8xxx/batt-alarm.h>
 #include <linux/ratelimit.h>
+#include <linux/gpio.h>
 
 #include <mach/msm_xo.h>
 #include <mach/msm_hsusb.h>
+#include <mach/gpio.h>
+
+#include <linux/android_alarm.h>
+#include <pm8921_oem_hkadc.h>
+#include <linux/earlysuspend.h>
+#include <linux/wakelock.h>
+#include <pm8921-charger_oem.h>
+#include <mach/oem_fact.h>
+#include <linux/reboot.h>
 
 #define CHG_BUCK_CLOCK_CTRL	0x14
 #define CHG_BUCK_CLOCK_CTRL_8038	0xD
@@ -256,6 +266,7 @@ struct pm8921_chg_chip {
 	struct power_supply		dc_psy;
 	struct power_supply		*ext_psy;
 	struct power_supply		batt_psy;
+	struct power_supply		bms_psy;
 	struct dentry			*dent;
 	struct bms_notify		bms_notify;
 	int				*usb_trim_table;
@@ -302,6 +313,20 @@ struct pm8921_chg_chip {
 
 /* user space parameter to limit usb current */
 static unsigned int usb_max_current;
+#define OEM_IUSBMAX_NOT_SET 0xFFFF
+static int oem_iusbmax_current = OEM_IUSBMAX_NOT_SET;
+static int oem_stand_detect_time_counter = 0;
+static int oem_get_vbatdet_low(struct pm8921_chg_chip *chip);
+struct wake_lock oem_hkadc_wake_lock;
+static bool is_hkadc_suspend_monit = 0;
+static void oem_uim_smem_init(void);
+static void fast_chg_limit_worker(struct work_struct *work);
+static void oem_charger_limit_control(struct work_struct *work);
+static void oem_hkadc_init(void);
+static void oem_chargermonit_init(void);
+static void oem_hkadc_exit(void);
+static void oem_chargermonit_exit(void);
+
 /*
  * usb_target_ma is used for wall charger
  * adaptive input current limiting only. Use
@@ -310,10 +335,13 @@ static unsigned int usb_max_current;
 static int usb_target_ma;
 static int charging_disabled;
 static int thermal_mitigation;
+static int charge_state;
+static bool is_batterydetected;
 
 static struct pm8921_chg_chip *the_chip;
 static void check_temp_thresholds(struct pm8921_chg_chip *chip);
 
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 #define LPM_ENABLE_BIT	BIT(2)
 static int pm8921_chg_set_lpm(struct pm8921_chg_chip *chip, int enable)
 {
@@ -338,6 +366,7 @@ static int pm8921_chg_set_lpm(struct pm8921_chg_chip *chip, int enable)
 
 	return rc;
 }
+#endif
 
 static int pm_chg_write(struct pm8921_chg_chip *chip, u16 addr, u8 reg)
 {
@@ -499,11 +528,29 @@ static int pm_chg_failed_clear(struct pm8921_chg_chip *chip, int clear)
 	return rc;
 }
 
+int oem_pm8921_disable_source_current(bool disable);
+int oem_pm8921_disable_source_current_flag = 0;
 #define CHG_CHARGE_DIS_BIT	BIT(1)
 static int pm_chg_charge_dis(struct pm8921_chg_chip *chip, int disable)
 {
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	return pm_chg_masked_write(chip, CHG_CNTRL, CHG_CHARGE_DIS_BIT,
 				disable ? CHG_CHARGE_DIS_BIT : 0);
+#else
+	int ret;
+
+	ret = pm_chg_masked_write(chip, CHG_CNTRL, CHG_CHARGE_DIS_BIT,
+				disable ? CHG_CHARGE_DIS_BIT : 0);
+	if (ret) {
+		pr_err("buck converter setting error %d\n", ret);
+		return ret;
+	}
+
+	if (0 == disable) {
+		oem_pm8921_disable_source_current_flag = 0;
+	}
+	return ret;
+#endif
 }
 
 static int pm_is_chg_charge_dis(struct pm8921_chg_chip *chip)
@@ -1408,7 +1455,32 @@ static char *pm_power_supplied_to[] = {
 	"battery",
 };
 
+extern bool oem_pm8921_bms_is_cyclecorrection_chargeoffstate(void);
+
+int oem_option_item1_bit0;
+int oem_option_item1_bit1;
+int oem_option_item1_bit2;
+int oem_option_item1_bit3;
+int oem_option_item1_bit4;
+static void oem_get_fact_option(void)
+{
+	oem_option_item1_bit0 = oem_fact_get_option_bit(OEM_FACT_OPTION_ITEM_01, 0);
+	oem_option_item1_bit1 = oem_fact_get_option_bit(OEM_FACT_OPTION_ITEM_01, 1);
+	oem_option_item1_bit2 = oem_fact_get_option_bit(OEM_FACT_OPTION_ITEM_01, 2);
+	oem_option_item1_bit3 = oem_fact_get_option_bit(OEM_FACT_OPTION_ITEM_01, 3);
+	oem_option_item1_bit4 = oem_fact_get_option_bit(OEM_FACT_OPTION_ITEM_01, 4);
+}
+
+extern int oem_bms_last_batt_status;
+extern int oem_bms_last_charge_type;
+
+int oem_last_batt_status;
+int oem_last_charge_type;
+int oem_last_dc_present;
+int oem_last_usb_present;
+int32_t oem_charger_control_flag = 1;
 #define USB_WALL_THRESHOLD_MA	500
+static uint32_t oem_charge_stand_flag = 0;
 static int pm_power_get_property_mains(struct power_supply *psy,
 				  enum power_supply_property psp,
 				  union power_supply_propval *val)
@@ -1424,6 +1496,12 @@ static int pm_power_get_property_mains(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_ONLINE:
 		val->intval = 0;
 
+		if ((pm_is_chg_charge_dis(the_chip)) &&
+		   (1 != oem_pm8921_disable_source_current_flag)) {
+			val->intval = 0;
+			return 0;
+		}
+
 		if (the_chip->has_dc_supply) {
 			val->intval = 1;
 			return 0;
@@ -1437,7 +1515,9 @@ static int pm_power_get_property_mains(struct power_supply *psy,
 		type = the_chip->usb_type;
 		if (type == POWER_SUPPLY_TYPE_USB_DCP ||
 			type == POWER_SUPPLY_TYPE_USB_ACA ||
-			type == POWER_SUPPLY_TYPE_USB_CDP)
+			type == POWER_SUPPLY_TYPE_USB_CDP ||
+			type == POWER_SUPPLY_TYPE_MHL ||
+			type == POWER_SUPPLY_TYPE_MAINS)
 			val->intval = is_usb_chg_plugged_in(the_chip);
 
 		break;
@@ -1567,6 +1647,11 @@ static int pm_power_get_property_usb(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_ONLINE:
 		val->intval = 0;
 
+		if ((pm_is_chg_charge_dis(the_chip)) &&
+		    (1 != oem_pm8921_disable_source_current_flag)) {
+			return 0;
+		}
+
 		if (the_chip->usb_type == POWER_SUPPLY_TYPE_USB)
 			val->intval = is_usb_chg_plugged_in(the_chip);
 
@@ -1603,6 +1688,16 @@ static enum power_supply_property msm_batt_power_props[] = {
 	POWER_SUPPLY_PROP_TEMP,
 	POWER_SUPPLY_PROP_CHARGE_FULL,
 	POWER_SUPPLY_PROP_CHARGE_NOW,
+	POWER_SUPPLY_PROP_OEM_PA_THERM,
+	POWER_SUPPLY_PROP_OEM_CAMERA_THERM,
+	POWER_SUPPLY_PROP_OEM_SUBSTRATE_THERM,
+	POWER_SUPPLY_PROP_OEM_USB_THERM,
+	POWER_SUPPLY_PROP_OEM_CHARGE_CONNECT_STATE,
+};
+
+static enum power_supply_property msm_bms_power_props[] = {
+	POWER_SUPPLY_PROP_OEM_BMS_CYCLE,
+	POWER_SUPPLY_PROP_OEM_BMS_BATT_STATUS,
 };
 
 static int get_prop_battery_uvolts(struct pm8921_chg_chip *chip)
@@ -1647,11 +1742,67 @@ static int get_prop_batt_present(struct pm8921_chg_chip *chip)
 	return pm_chg_get_rt_status(chip, BATT_INSERTED_IRQ);
 }
 
+enum oem_charger_mode {
+	OEM_STATUS_NORMAL= 0,
+	OEM_STATUS_LIMIT,
+	OEM_STATUS_STOP
+};
+static uint32_t oem_charge_status = OEM_STATUS_NORMAL;
+static int oem_vbatt = 0;
+static int oem_batt_temp = 0;
+
+enum oem_charge_vbatt_ov_state_ {
+	OEM_CHARGE_VBATT_STATE_OFF= 0,
+	OEM_CHARGE_VBATT_STATE_ON,
+	OEM_CHARGE_VBATT_STATE_OVOFF
+};
+
+static struct work_struct	chg_vbatt_ov_work;
+int oem_charge_vbatt_ov_state=OEM_CHARGE_VBATT_STATE_OFF;
+int oem_charge_vbatt_ov_state_now=OEM_CHARGE_VBATT_STATE_OFF;
+
+static bool is_oem_fast_chg_expired=false;
+static int oem_stand_detect  = 0;
 static int get_prop_batt_status(struct pm8921_chg_chip *chip)
 {
 	int batt_state = POWER_SUPPLY_STATUS_DISCHARGING;
 	int fsm_state = pm_chg_get_fsm_state(chip);
 	int i;
+
+  if ((!pm_chg_get_rt_status(chip, USBIN_UV_IRQ)) && (pm_chg_get_rt_status(chip, USBIN_OV_IRQ))) {
+    return POWER_SUPPLY_STATUS_NOT_CHARGING;
+  }
+
+  if ((!pm_chg_get_rt_status(chip, DCIN_UV_IRQ)) && (pm_chg_get_rt_status(chip, DCIN_OV_IRQ))){
+    return POWER_SUPPLY_STATUS_NOT_CHARGING;
+  }
+
+	if (!chip->dc_present && !chip->usb_present && !oem_stand_detect) {
+		return POWER_SUPPLY_STATUS_DISCHARGING;
+	}
+
+	if (oem_charge_vbatt_ov_state_now == OEM_CHARGE_VBATT_STATE_OVOFF){
+		return POWER_SUPPLY_STATUS_NOT_CHARGING;
+	}
+
+	if (is_oem_fast_chg_expired) {
+		return POWER_SUPPLY_STATUS_NOT_CHARGING;
+	}
+
+	if (oem_charge_stand_flag) {
+		return POWER_SUPPLY_STATUS_CHARGING;
+	}
+
+	if (oem_pm8921_bms_is_cyclecorrection_chargeoffstate()) {
+		return POWER_SUPPLY_STATUS_CHARGING;
+	}
+
+	if (OEM_STATUS_STOP == oem_charge_status)
+		return POWER_SUPPLY_STATUS_NOT_CHARGING;
+	if (pm_chg_get_rt_status(chip, BATTTEMP_HOT_IRQ))
+		return POWER_SUPPLY_STATUS_NOT_CHARGING;
+	if (pm_chg_get_rt_status(chip, BATTTEMP_COLD_IRQ))
+		return POWER_SUPPLY_STATUS_NOT_CHARGING;
 
 	if (chip->ext_psy) {
 		if (chip->ext_charge_done)
@@ -1675,6 +1826,7 @@ static int get_prop_batt_status(struct pm8921_chg_chip *chip)
 	return batt_state;
 }
 
+static int charge_uim_valid = 1;
 static int get_prop_batt_capacity(struct pm8921_chg_chip *chip)
 {
 	int percent_soc;
@@ -1685,7 +1837,11 @@ static int get_prop_batt_capacity(struct pm8921_chg_chip *chip)
 	if (!get_prop_batt_present(chip))
 		percent_soc = voltage_based_capacity(chip);
 	else
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 		percent_soc = pm8921_bms_get_percent_charge();
+#else
+		percent_soc = pm8921_bms_get_percent_charge(charge_state, charge_uim_valid);
+#endif
 
 	if (percent_soc == -ENXIO)
 		percent_soc = voltage_based_capacity(chip);
@@ -1696,24 +1852,7 @@ static int get_prop_batt_capacity(struct pm8921_chg_chip *chip)
 	}
 
 	if (percent_soc <= 10)
-		pr_warn_ratelimited("low battery charge = %d%%\n",
-						percent_soc);
-
-	if (percent_soc <= chip->resume_charge_percent
-		&& get_prop_batt_status(chip) == POWER_SUPPLY_STATUS_FULL) {
-		pr_debug("soc fell below %d. charging enabled.\n",
-						chip->resume_charge_percent);
-		if (chip->is_bat_warm)
-			pr_warn_ratelimited("battery is warm = %d, do not resume charging at %d%%.\n",
-					chip->is_bat_warm,
-					chip->resume_charge_percent);
-		else if (chip->is_bat_cool)
-			pr_warn_ratelimited("battery is cool = %d, do not resume charging at %d%%.\n",
-					chip->is_bat_cool,
-					chip->resume_charge_percent);
-		else
-			pm_chg_vbatdet_set(the_chip, PM8921_CHG_VBATDET_MAX);
-	}
+		pr_debug("low battery charge = %d%%\n", percent_soc);
 
 fail_voltage:
 	chip->recent_reported_soc = percent_soc;
@@ -1755,6 +1894,110 @@ static int get_prop_batt_fcc(struct pm8921_chg_chip *chip)
 	return rc;
 }
 
+static void chg_vbatt_ov_check_charger(void)
+{
+	int count=0;
+
+	if (!pm_chg_get_rt_status(the_chip, DCIN_UV_IRQ)){
+		count += 1;
+	}
+	if (!pm_chg_get_rt_status(the_chip, USBIN_UV_IRQ)){
+		count += 2;
+	}
+	if (count == 0){
+		oem_charge_vbatt_ov_state = OEM_CHARGE_VBATT_STATE_OFF;
+	}else{
+		oem_charge_vbatt_ov_state = OEM_CHARGE_VBATT_STATE_ON;
+	}
+	pr_debug("uv state %d\n", count);
+	schedule_work(&chg_vbatt_ov_work);
+}
+
+struct delayed_work oem_charger_work;
+static void chg_vbatt_ov_worker(struct work_struct *work)
+{
+
+	bool check = true;
+	int ret;
+
+	pr_debug("oem_charge_vbatt_ov_state-1 %d, oem_charge_vbatt_ov_state_now %d\n"
+			, oem_charge_vbatt_ov_state, oem_charge_vbatt_ov_state_now);
+
+	switch(oem_charge_vbatt_ov_state){
+	case OEM_CHARGE_VBATT_STATE_OFF:
+
+		if (oem_charge_vbatt_ov_state_now == OEM_CHARGE_VBATT_STATE_OVOFF){
+			pr_debug("charger removed\n");
+			ret = oem_pm8921_disable_source_current(false);
+			if (ret) {
+				pr_err("error buck converter setting value %d\n", ret);
+			}
+		}
+		oem_charge_vbatt_ov_state_now = OEM_CHARGE_VBATT_STATE_OFF;
+
+		break;
+
+	case OEM_CHARGE_VBATT_STATE_ON:
+		do {
+			if (!is_batterydetected){
+				check = false;
+				pr_debug("battery removed.\n");
+				break;
+			}
+
+			if ((oem_param_charger.chg_stop_volt * 1000) > oem_vbatt){
+				check = false;
+				pr_debug("vbatt normal %d.\n", oem_vbatt);
+				break;
+			}
+		} while(0);
+
+		if (check) {
+			pr_err("vbatt ov detected\n");
+			if (oem_charge_vbatt_ov_state_now != OEM_CHARGE_VBATT_STATE_OVOFF){
+				pr_err("chg off\n");
+				if (OEM_STATUS_LIMIT == oem_charge_status) {
+					oem_charge_status = OEM_STATUS_NORMAL;
+					cancel_delayed_work_sync(&oem_charger_work);
+				}
+				oem_charge_vbatt_ov_state = OEM_CHARGE_VBATT_STATE_OVOFF;
+				oem_charge_vbatt_ov_state_now = OEM_CHARGE_VBATT_STATE_OVOFF;
+				ret = oem_pm8921_disable_source_current(true);
+				if (ret) {
+					pr_err("error buck converter setting value %d\n", ret);
+				}
+			}
+		}else{
+			oem_charge_vbatt_ov_state_now = OEM_CHARGE_VBATT_STATE_ON;
+		}
+
+		break;
+
+	case OEM_CHARGE_VBATT_STATE_OVOFF:
+
+		if (!is_batterydetected){
+			pr_debug("battery removed.\n");
+			oem_charge_vbatt_ov_state = OEM_CHARGE_VBATT_STATE_ON;
+			oem_charge_vbatt_ov_state_now = OEM_CHARGE_VBATT_STATE_ON;
+			ret = oem_pm8921_disable_source_current(false);
+			if (ret) {
+				pr_err("error buck converter setting value %d\n", ret);
+			}
+			break;
+		}
+
+		break;
+
+	default:
+		pr_info("oem_charge_vbatt_ov_state Illegal state. %d\n", oem_charge_vbatt_ov_state);
+		break;
+
+	}
+
+	pr_debug("oem_charge_vbatt_ov_state-2 %d, oem_charge_vbatt_ov_state_now %d\n", oem_charge_vbatt_ov_state, oem_charge_vbatt_ov_state_now);
+
+}
+
 static int get_prop_batt_charge_now(struct pm8921_chg_chip *chip, int *cc_uah)
 {
 	int rc;
@@ -1771,6 +2014,12 @@ static int get_prop_batt_health(struct pm8921_chg_chip *chip)
 {
 	int temp;
 
+	if (oem_charge_vbatt_ov_state_now == OEM_CHARGE_VBATT_STATE_OVOFF)
+		return POWER_SUPPLY_HEALTH_OVERVOLTAGE;
+
+	if (!is_batterydetected)
+		return POWER_SUPPLY_HEALTH_UNKNOWN;
+
 	temp = pm_chg_get_rt_status(chip, BATTTEMP_HOT_IRQ);
 	if (temp)
 		return POWER_SUPPLY_HEALTH_OVERHEAT;
@@ -1779,12 +2028,28 @@ static int get_prop_batt_health(struct pm8921_chg_chip *chip)
 	if (temp)
 		return POWER_SUPPLY_HEALTH_COLD;
 
+	if (OEM_STATUS_STOP == oem_charge_status)
+		return POWER_SUPPLY_HEALTH_DEAD;
+	
+	if ((!pm_chg_get_rt_status(chip, USBIN_UV_IRQ)) && (pm_chg_get_rt_status(chip, USBIN_OV_IRQ))) {
+	  pr_err("USB OVP detect\n");
+		return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
+	}
+	if ((!pm_chg_get_rt_status(chip, DCIN_UV_IRQ)) && (pm_chg_get_rt_status(chip, DCIN_OV_IRQ))){
+	  pr_err("DCIN OVP detect");
+		return POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
+	}
+
 	return POWER_SUPPLY_HEALTH_GOOD;
 }
 
 static int get_prop_charge_type(struct pm8921_chg_chip *chip)
 {
 	int temp;
+
+	if (oem_charge_stand_flag) {
+		return POWER_SUPPLY_CHARGE_TYPE_FAST;
+	}
 
 	if (!get_prop_batt_present(chip))
 		return POWER_SUPPLY_CHARGE_TYPE_NONE;
@@ -1834,21 +2099,55 @@ static int get_prop_batt_temp(struct pm8921_chg_chip *chip, int *temp)
 	return rc;
 }
 
+static int oem_charger_pm_batt_power_get_property(enum power_supply_property psp, int *intval);
+static int oem_hkadc_pm_batt_power_get_property(enum power_supply_property psp, int *intval);
 static int pm_batt_power_get_property(struct power_supply *psy,
 				       enum power_supply_property psp,
 				       union power_supply_propval *val)
 {
+	int result;
 	int rc = 0;
 	int value;
 	struct pm8921_chg_chip *chip = container_of(psy, struct pm8921_chg_chip,
 								batt_psy);
+	result = oem_charger_pm_batt_power_get_property(psp, &(val->intval));
+	if (result!=-EINVAL){
+		return result;
+	}
+
+	result = oem_hkadc_pm_batt_power_get_property(psp, &(val->intval));
+	if (result!=-EINVAL){
+		return result;
+	}
+
 	switch (psp) {
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	case POWER_SUPPLY_PROP_STATUS:
 		val->intval = get_prop_batt_status(chip);
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_TYPE:
 		val->intval = get_prop_charge_type(chip);
 		break;
+#else
+	case POWER_SUPPLY_PROP_STATUS:
+		if ((OEM_STATUS_LIMIT == oem_charge_status) && (1 == oem_charger_control_flag)) {
+			val->intval = oem_last_batt_status;
+		} else if (oem_pm8921_bms_is_cyclecorrection_chargeoffstate()){
+			val->intval = oem_bms_last_batt_status;
+		} else {
+		val->intval = get_prop_batt_status(chip);
+		}
+		break;
+	case POWER_SUPPLY_PROP_CHARGE_TYPE:
+		if ((OEM_STATUS_LIMIT == oem_charge_status) && (1 == oem_charger_control_flag)) {
+			val->intval = oem_last_charge_type;
+		} else if (oem_pm8921_bms_is_cyclecorrection_chargeoffstate()){
+			val->intval = oem_bms_last_charge_type;
+		} else {
+		val->intval = get_prop_charge_type(chip);
+		}
+		break;
+#endif
 	case POWER_SUPPLY_PROP_HEALTH:
 		val->intval = get_prop_batt_health(chip);
 		break;
@@ -1916,6 +2215,29 @@ static int pm_batt_power_get_property(struct power_supply *psy,
 	}
 
 	return rc;
+}
+
+static int pm_bms_power_get_property(struct power_supply *psy,
+				       enum power_supply_property psp,
+				       union power_supply_propval *val)
+{
+	int result = 0;
+
+	switch (psp) {
+	case POWER_SUPPLY_PROP_OEM_BMS_CYCLE:
+		val->intval = oem_pm8921_bms_get_chargecycles();
+		pr_debug("BMS_CYCLE:%d\n", val->intval);
+		break;
+
+	case POWER_SUPPLY_PROP_OEM_BMS_BATT_STATUS:
+		val->intval = oem_pm8921_bms_get_deteriorationstatus();
+		pr_debug("BMS_BATT_STATUS:%d\n", val->intval);
+		break;
+
+	default:
+		result = -EINVAL;
+	}
+	return result;
 }
 
 static void (*notify_vbus_state_func_ptr)(int);
@@ -2005,6 +2327,8 @@ void pm8921_charger_vbus_draw(unsigned int mA)
 
 	pr_debug("Enter charge=%d\n", mA);
 
+	oem_iusbmax_current = mA;
+
 	/*
 	 * Reject VBUS requests if USB connection is the only available
 	 * power source. This makes sure that if booting without
@@ -2092,6 +2416,17 @@ int pm8921_is_batfet_closed(void)
 	return is_batfet_closed(the_chip);
 }
 EXPORT_SYMBOL(pm8921_is_batfet_closed);
+
+int pm8921_get_chg_vddmax(int *voltage)
+{
+	if (!the_chip) {
+		pr_err("called before init\n");
+		return -EINVAL;
+	}
+  return pm_chg_vddmax_get(the_chip, voltage);
+}
+EXPORT_SYMBOL(pm8921_get_chg_vddmax);
+
 /*
  * Disabling the charge current limit causes current
  * current limits to have no monitoring. An adequate charger
@@ -2298,6 +2633,9 @@ int pm8921_batt_temperature(void)
 	return temp;
 }
 
+struct wake_lock oem_charge_wake_lock;
+static struct work_struct	fast_chg_count_stop_work;
+static struct work_struct	fast_chg_count_stop_work_usb;
 static void handle_usb_insertion_removal(struct pm8921_chg_chip *chip)
 {
 	int usb_present;
@@ -2312,11 +2650,17 @@ static void handle_usb_insertion_removal(struct pm8921_chg_chip *chip)
 		pm8921_bms_calibrate_hkadc();
 	}
 	if (usb_present) {
+		pm_chg_auto_enable(chip, 1);
+		pr_debug("handle_usb_insertion_removal() usb valid\n");
+		wake_lock(&oem_charge_wake_lock);
 		schedule_delayed_work(&chip->unplug_check_work,
 			msecs_to_jiffies(UNPLUG_CHECK_RAMP_MS));
 		pm8921_chg_enable_irq(chip, CHG_GONE_IRQ);
 	} else {
 		/* USB unplugged reset target current */
+		pr_debug("handle_usb_insertion_removal() usb invalid\n");
+		schedule_work(&fast_chg_count_stop_work_usb);
+		wake_unlock(&oem_charge_wake_lock);
 		usb_target_ma = 0;
 		pm8921_chg_disable_irq(chip, CHG_GONE_IRQ);
 	}
@@ -2596,6 +2940,8 @@ static void vin_collapse_check_worker(struct work_struct *work)
 	if (is_usb_chg_plugged_in(chip)
 		&& usb_target_ma > USB_WALL_THRESHOLD_MA
 		&& !chip->disable_aicl) {
+		pm_chg_auto_enable(chip, 1);
+		wake_lock(&oem_charge_wake_lock);
 		/* decrease usb_target_ma */
 		decrease_usb_ma_value(&usb_target_ma);
 		/* reset here, increase in unplug_check_worker */
@@ -2611,15 +2957,76 @@ static void vin_collapse_check_worker(struct work_struct *work)
 	}
 }
 
+static void oem_uim_check(unsigned int* max_voltage_normal);
+enum voltage_delta {
+	VOLTAGE_DELTA_INIT = 0,
+	VOLTAGE_DELTA_RESUME
+};
+static void oem_voltage_setting(enum voltage_delta delta_id)
+{
+	int rc;
+	int set_voltage_mv;
+
+	if (!the_chip) {
+		pr_err("called before init\n");
+		return;
+	}
+
+	oem_uim_check(&the_chip->max_voltage_mv);
+
+	if (VOLTAGE_DELTA_INIT == delta_id) {
+		the_chip->resume_voltage_delta = oem_param_charger.initial_delta_volt;
+	} else if (VOLTAGE_DELTA_RESUME == delta_id) {
+		the_chip->resume_voltage_delta = oem_param_charger.rechg_delta_volt;
+	}
+
+	if (the_chip->is_bat_warm) {
+		set_voltage_mv = the_chip->warm_bat_voltage;
+	} else if (the_chip->is_bat_cool) {
+		set_voltage_mv = the_chip->cool_bat_voltage;
+	} else {
+		set_voltage_mv = the_chip->max_voltage_mv;
+	}
+
+	rc = pm_chg_vbatdet_set(the_chip,
+			set_voltage_mv - the_chip->resume_voltage_delta);
+	if (rc) {
+		pr_err("Failed to set vbatdet comprator voltage to %d rc=%d\n",
+			set_voltage_mv - the_chip->resume_voltage_delta, rc);
+	}
+
+	rc = pm_chg_vddmax_set(the_chip, set_voltage_mv);
+	if (rc) {
+		pr_err("Failed to set max voltage to %d rc=%d\n",
+						set_voltage_mv, rc);
+	}
+
+}
+
 #define VIN_MIN_COLLAPSE_CHECK_MS	50
 static irqreturn_t usbin_valid_irq_handler(int irq, void *data)
 {
+
 	if (usb_target_ma)
 		schedule_delayed_work(&the_chip->vin_collapse_check_work,
 				      round_jiffies_relative(msecs_to_jiffies
 						(VIN_MIN_COLLAPSE_CHECK_MS)));
 	else
 	    handle_usb_insertion_removal(data);
+
+	chg_vbatt_ov_check_charger();
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t usbin_ov_irq_handler(int irq, void *data)
+{
+	pr_debug("USB OverVoltage\n");
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t usbin_uv_irq_handler(int irq, void *data)
+{
+	pr_debug("USB UnderVoltage\n");
 	return IRQ_HANDLED;
 }
 
@@ -2730,8 +3137,67 @@ static irqreturn_t chgfail_irq_handler(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+static struct delayed_work	fast_chg_limit_work;
+static struct work_struct	fast_chg_count_start_work;
+static bool is_oem_fast_chg_counting=false;
+static int oem_hkadc_master_data_read(enum power_supply_property psp, int *intval);
+static void fast_chg_count_start_worker(struct work_struct *work)
+{
+
+	int ret = 0;
+	int battemp;
+
+	if (!is_oem_fast_chg_counting){
+
+		ret = oem_hkadc_master_data_read(POWER_SUPPLY_PROP_TEMP, &battemp);
+		if (ret) {
+			pr_err("Failed to reading batt temp, ret = %d\n", ret);
+			return;
+		}
+
+		if (battemp > (oem_param_charger.chg_cool_tmp * 10)){
+			schedule_delayed_work(&fast_chg_limit_work,
+					round_jiffies_relative(msecs_to_jiffies
+						(oem_param_charger.time_chg * 60 * 1000)));
+		}else{
+			schedule_delayed_work(&fast_chg_limit_work,
+					round_jiffies_relative(msecs_to_jiffies
+						(oem_param_charger.time_cool_chg * 60 * 1000)));
+		}
+		is_oem_fast_chg_counting = true;
+		is_oem_fast_chg_expired=false;
+	}
+
+}
+
+static void fast_chg_count_stop_worker(struct work_struct *work)
+{
+	pr_debug("fast_chg_count_stop_worker() called\n");
+	pr_debug("oem_charge_status=%d\n", oem_charge_status);
+	if ((is_oem_fast_chg_counting) &&
+		(OEM_STATUS_LIMIT != oem_charge_status) &&
+		(!oem_pm8921_bms_is_cyclecorrection_chargeoffstate())){
+		pr_debug("fast_chg_count_stop_worker() canceled\n");
+		cancel_work_sync(&fast_chg_count_start_work);
+		cancel_delayed_work_sync(&fast_chg_limit_work);
+		is_oem_fast_chg_counting = false;
+	}
+}
+
+static void fast_chg_count_stop_worker_usb(struct work_struct *work)
+{
+	pr_debug("fast_chg_count_stop_worker_usb() called\n");
+	if (is_oem_fast_chg_counting){
+		pr_debug("fast_chg_count_stop_worker() canceled\n");
+		cancel_work_sync(&fast_chg_count_start_work);
+		cancel_delayed_work_sync(&fast_chg_limit_work);
+		is_oem_fast_chg_counting = false;
+	}
+}
+
 static irqreturn_t chgstate_irq_handler(int irq, void *data)
 {
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	struct pm8921_chg_chip *chip = data;
 
 	pr_debug("state_changed_to=%d\n", pm_chg_get_fsm_state(data));
@@ -2739,7 +3205,20 @@ static irqreturn_t chgstate_irq_handler(int irq, void *data)
 	power_supply_changed(&chip->usb_psy);
 	power_supply_changed(&chip->dc_psy);
 
+
 	bms_notify_check(chip);
+#else
+	struct pm8921_chg_chip *chip = data;
+	int fsm_state = pm_chg_get_fsm_state(chip);
+
+	if (FSM_STATE_EOC_10 == fsm_state) {
+
+	} else if (FSM_STATE_ON_CHG_HIGHI_1 == fsm_state) {
+
+	} else {
+		oem_voltage_setting(VOLTAGE_DELTA_INIT);
+	}
+#endif
 
 	return IRQ_HANDLED;
 }
@@ -2888,6 +3367,35 @@ static void unplug_check_worker(struct work_struct *work)
 		unplug_ovp_fet_open(chip);
 	}
 
+	active_chg_plugged_in = is_active_chg_plugged_in(chip, active_path);
+	pr_debug("active_path = 0x%x, active_chg_plugged_in = %d\n",
+			active_path, active_chg_plugged_in);
+	if (active_path & USB_ACTIVE_BIT) {
+		pr_debug("USB charger active\n");
+
+		pm_chg_iusbmax_get(chip, &usb_ma);
+	} else if (active_path & DC_ACTIVE_BIT) {
+		pr_debug("DC charger active\n");
+	} else {
+		/* No charger active */
+		if (!(is_usb_chg_plugged_in(chip)
+				&& !(is_dc_chg_plugged_in(chip)))) {
+			get_prop_batt_current(chip, &ibat);
+			pr_debug(
+			"Stop: chg removed reg_loop = %d, fsm = %d ibat = %d\n",
+				pm_chg_get_regulation_loop(chip),
+				pm_chg_get_fsm_state(chip),
+				ibat
+				);
+			return;
+		} else {
+			goto check_again_later;
+		}
+	}
+
+	reg_loop = pm_chg_get_regulation_loop(chip);
+	pr_debug("reg_loop=0x%x usb_ma = %d\n", reg_loop, usb_ma);
+
 	/* AICL only for usb wall charger */
 	if (!(reg_loop & VIN_ACTIVE_BIT) && (active_path & USB_ACTIVE_BIT)
 		&& usb_target_ma > 0
@@ -2960,6 +3468,7 @@ static irqreturn_t fastchg_irq_handler(int irq, void *data)
 	struct pm8921_chg_chip *chip = data;
 	int high_transition;
 
+
 	high_transition = pm_chg_get_rt_status(chip, FASTCHG_IRQ);
 	if (high_transition && !delayed_work_pending(&chip->eoc_work)) {
 		wake_lock(&chip->eoc_wake_lock);
@@ -2967,6 +3476,17 @@ static irqreturn_t fastchg_irq_handler(int irq, void *data)
 				      round_jiffies_relative(msecs_to_jiffies
 						     (EOC_CHECK_PERIOD_MS)));
 	}
+
+	pr_debug("fastchg_irq_handler() FASTCHG_IRQ %d\n", high_transition);
+	if (high_transition){
+		if (!is_oem_fast_chg_expired){
+			schedule_work(&fast_chg_count_start_work);
+			pr_debug("fastchg_irq_handler() -schedule_work(&fast_chg_count_start_work)\n");
+		}
+	}else{
+		schedule_work(&fast_chg_count_stop_work);
+	}
+
 	if (high_transition
 		&& chip->btc_override
 		&& !delayed_work_pending(&chip->btc_override_work)) {
@@ -3004,6 +3524,7 @@ static irqreturn_t batttemp_hot_irq_handler(int irq, void *data)
 {
 	struct pm8921_chg_chip *chip = data;
 
+	pr_debug("Batt hot fsm_state=%d\n", pm_chg_get_fsm_state(data));
 	handle_stop_ext_chg(chip);
 	power_supply_changed(&chip->batt_psy);
 	return IRQ_HANDLED;
@@ -3159,6 +3680,11 @@ static irqreturn_t dcin_uv_irq_handler(int irq, void *data)
 	struct pm8921_chg_chip *chip = data;
 
 	handle_stop_ext_chg(chip);
+
+	if (oem_stand_detect_time_counter >= 1) {
+		oem_pm8921_disable_source_current(false);
+		oem_stand_detect_time_counter = 0;
+	}
 
 	return IRQ_HANDLED;
 }
@@ -3404,10 +3930,15 @@ enum {
 static int is_charging_finished(struct pm8921_chg_chip *chip,
 			int vbat_batt_terminal_uv, int ichg_meas_ma)
 {
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	int vbat_programmed, iterm_programmed, vbat_intended;
+#else
+	int vbat_programmed, iterm_programmed;
+#endif
 	int regulation_loop, fast_chg, vcp;
 	int rc;
 	static int last_vbat_programmed = -EINVAL;
+	int vbatdet_low;
 
 	if (!is_ext_charging(chip)) {
 		/* return if the battery is not being fastcharged */
@@ -3419,6 +3950,11 @@ static int is_charging_finished(struct pm8921_chg_chip *chip,
 		vcp = pm_chg_get_rt_status(chip, VCP_IRQ);
 		pr_debug("vcp = %d\n", vcp);
 		if (vcp == 1)
+			return CHG_IN_PROGRESS;
+
+		vbatdet_low = oem_get_vbatdet_low(chip);
+		pr_debug("vbatdet_low = %d\n", vbatdet_low);
+		if (vbatdet_low == 1)
 			return CHG_IN_PROGRESS;
 
 		/* reset count if battery is hot/cold */
@@ -3445,6 +3981,7 @@ static int is_charging_finished(struct pm8921_chg_chip *chip,
 			return CHG_IN_PROGRESS;
 		}
 
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 		if (chip->is_bat_cool)
 			vbat_intended = chip->cool_bat_voltage;
 		else if (chip->is_bat_warm)
@@ -3460,6 +3997,7 @@ static int is_charging_finished(struct pm8921_chg_chip *chip,
 							vbat_intended);
 			return CHG_IN_PROGRESS;
 		}
+#endif
 
 		regulation_loop = pm_chg_get_regulation_loop(chip);
 		if (regulation_loop < 0) {
@@ -3701,6 +4239,8 @@ static void eoc_worker(struct work_struct *work)
 		count = 0;
 		pr_info("End of Charging\n");
 
+		oem_voltage_setting(VOLTAGE_DELTA_RESUME);
+
 		pm_chg_auto_enable(chip, 0);
 
 		if (is_ext_charging(chip))
@@ -3859,9 +4399,10 @@ static void __devinit determine_initial_state(struct pm8921_chg_chip *chip)
 	chip->usb_present = !!is_usb_chg_plugged_in(chip);
 
 	notify_usb_of_the_plugin_event(chip->usb_present);
-	if (chip->usb_present || chip->dc_present) {
+	if (chip->usb_present) {
 		schedule_delayed_work(&chip->unplug_check_work,
-			msecs_to_jiffies(UNPLUG_CHECK_WAIT_PERIOD_MS));
+			round_jiffies_relative(msecs_to_jiffies
+				(UNPLUG_CHECK_WAIT_PERIOD_MS)));
 		pm8921_chg_enable_irq(chip, CHG_GONE_IRQ);
 
 		if (chip->btc_override)
@@ -3880,6 +4421,9 @@ static void __devinit determine_initial_state(struct pm8921_chg_chip *chip)
 	pm8921_chg_enable_irq(chip, FASTCHG_IRQ);
 	pm8921_chg_enable_irq(chip, VBATDET_LOW_IRQ);
 	pm8921_chg_enable_irq(chip, BAT_TEMP_OK_IRQ);
+
+	pm8921_chg_enable_irq(chip, TRKLCHG_IRQ);
+	pm8921_chg_enable_irq(chip, CHGSTATE_IRQ);
 
 	if (get_prop_batt_present(the_chip) || is_dc_chg_plugged_in(the_chip))
 		if (usb_chg_current)
@@ -3993,6 +4537,9 @@ struct pm_chg_irq_init_data chg_irq_data[] = {
 	CHG_IRQ(DCIN_OV_IRQ, IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING,
 						dcin_ov_irq_handler),
 	CHG_IRQ(DCIN_UV_IRQ, IRQF_TRIGGER_RISING, dcin_uv_irq_handler),
+	CHG_IRQ(USBIN_OV_IRQ, IRQF_TRIGGER_RISING, usbin_ov_irq_handler),
+	CHG_IRQ(USBIN_UV_IRQ, IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING,
+							usbin_uv_irq_handler),
 };
 
 static int __devinit request_irqs(struct pm8921_chg_chip *chip,
@@ -4138,6 +4685,7 @@ static void detect_battery_removal(struct pm8921_chg_chip *chip)
 #define CHG_VCP_EN		BIT(0)
 #define CHG_BAT_TEMP_DIS_BIT	BIT(2)
 #define SAFE_CURRENT_MA		1500
+#define VREF_BATT_THERM_FORCE_ON_2	BIT(4)
 #define PM_SUB_REV		0x001
 #define MIN_CHARGE_CURRENT_MA	350
 #define DEFAULT_SAFETY_MINUTES	500
@@ -4398,6 +4946,35 @@ static int __devinit pm8921_chg_hw_init(struct pm8921_chg_chip *chip)
 	return 0;
 }
 
+enum pm8921_dc_ov_threshold {
+	PM_DC_OV_8P5V,
+	PM_DC_OV_9V,
+	PM_DC_OV_9P5V,
+	PM_DC_OV_10V,
+};
+
+#define DC_OV_THRESHOLD_MASK 0x60
+#define DC_OV_THRESHOLD_SHIFT 5
+int pm8921_dc_ovp_set_threshold(enum pm8921_dc_ov_threshold ov) {
+	u8 temp;
+
+  if (!the_chip)
+	{
+		pr_err("called before init\n");
+		return -EINVAL;
+	}
+
+	if (ov > PM_DC_OV_10V)
+	{
+		pr_err("limiting to over voltage threshold to 7volts\n");
+	        ov = PM_DC_OV_10V;
+	}
+
+	temp = DC_OV_THRESHOLD_MASK & (ov << DC_OV_THRESHOLD_SHIFT);
+	temp |= 0x80;
+	return pm_chg_masked_write(the_chip, DC_OVP_CONTROL, DC_OV_THRESHOLD_MASK, temp);
+}
+
 static int get_rt_status(void *data, u64 * val)
 {
 	int i = (int)data;
@@ -4461,11 +5038,12 @@ static int set_reg(void *data, u64 val)
 	if (ret) {
 		pr_err("pm_chg_write to %x value =%d errored = %d\n",
 			addr, temp, ret);
-		return -EAGAIN;
 	}
 	return 0;
 }
 DEFINE_SIMPLE_ATTRIBUTE(reg_fops, get_reg, set_reg, "0x%02llx\n");
+
+
 
 static int reg_loop;
 #define MAX_REG_LOOP_CHAR	10
@@ -4642,9 +5220,12 @@ static void create_debugfs_entries(struct pm8921_chg_chip *chip)
 
 static int pm8921_charger_suspend_noirq(struct device *dev)
 {
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	int rc;
+#endif
 	struct pm8921_chg_chip *chip = dev_get_drvdata(dev);
 
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	rc = pm_chg_masked_write(chip, CHG_CNTRL, VREF_BATT_THERM_FORCE_ON, 0);
 	if (rc)
 		pr_err("Failed to Force Vref therm off rc=%d\n", rc);
@@ -4652,6 +5233,7 @@ static int pm8921_charger_suspend_noirq(struct device *dev)
 	rc = pm8921_chg_set_lpm(chip, 1);
 	if (rc)
 		pr_err("Failed to set lpm rc=%d\n", rc);
+#endif
 
 	pm8921_chg_set_hw_clk_switching(chip);
 
@@ -4660,19 +5242,25 @@ static int pm8921_charger_suspend_noirq(struct device *dev)
 
 static int pm8921_charger_resume_noirq(struct device *dev)
 {
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	int rc;
+#endif
 	struct pm8921_chg_chip *chip = dev_get_drvdata(dev);
 
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	rc = pm8921_chg_set_lpm(chip, 0);
 	if (rc)
 		pr_err("Failed to set lpm rc=%d\n", rc);
+#endif
 
 	pm8921_chg_force_19p2mhz_clk(chip);
 
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	rc = pm_chg_masked_write(chip, CHG_CNTRL, VREF_BATT_THERM_FORCE_ON,
 						VREF_BATT_THERM_FORCE_ON);
 	if (rc)
 		pr_err("Failed to Force Vref therm on rc=%d\n", rc);
+#endif
 	return 0;
 }
 
@@ -4690,6 +5278,9 @@ static int pm8921_charger_resume(struct device *dev)
 		schedule_delayed_work(&chip->btc_override_work, 0);
 
 	schedule_delayed_work(&chip->update_heartbeat_work, 0);
+
+	wake_lock(&oem_hkadc_wake_lock);
+	is_hkadc_suspend_monit = 1;
 
 	return 0;
 }
@@ -4710,12 +5301,18 @@ static int pm8921_charger_suspend(struct device *dev)
 
 	return 0;
 }
+
 static int __devinit pm8921_charger_probe(struct platform_device *pdev)
 {
 	int rc = 0;
 	struct pm8921_chg_chip *chip;
 	const struct pm8921_charger_platform_data *pdata
 				= pdev->dev.platform_data;
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+	int gpio_trigger_tbatt2 = 0;
+	int gpio_trigger_det_n = 0;
+	bool boot_stand_flag = true;
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
 
 	if (!pdata) {
 		pr_err("missing platform data\n");
@@ -4729,58 +5326,107 @@ static int __devinit pm8921_charger_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	}
 
+	oem_chg_param_init();
+	oem_get_fact_option();
+	oem_uim_smem_init();
+
 	chip->dev = &pdev->dev;
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	chip->ttrkl_time = pdata->ttrkl_time;
+#else
+	chip->ttrkl_time = oem_param_charger.time_trkl_pm;
+#endif
 	chip->update_time = pdata->update_time;
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	chip->max_voltage_mv = pdata->max_voltage;
+#else
+	oem_uim_check(&chip->max_voltage_mv);
+#endif
 	chip->alarm_low_mv = pdata->alarm_low_mv;
 	chip->alarm_high_mv = pdata->alarm_high_mv;
 	chip->min_voltage_mv = pdata->min_voltage;
 	chip->safe_current_ma = pdata->safe_current_ma;
 	chip->uvd_voltage_mv = pdata->uvd_thresh_voltage;
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	chip->resume_voltage_delta = pdata->resume_voltage_delta;
+#else
+	chip->resume_voltage_delta = oem_param_charger.initial_delta_volt;
+#endif
 	chip->resume_charge_percent = pdata->resume_charge_percent;
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	chip->term_current = pdata->term_current;
+#else
+	chip->term_current = oem_param_charger.i_chg_finish;
+#endif
 	chip->vbat_channel = pdata->charger_cdata.vbat_channel;
 	chip->batt_temp_channel = pdata->charger_cdata.batt_temp_channel;
 	chip->batt_id_channel = pdata->charger_cdata.batt_id_channel;
 	chip->batt_id_min = pdata->batt_id_min;
 	chip->batt_id_max = pdata->batt_id_max;
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	if (pdata->cool_temp != INT_MIN)
 		chip->cool_temp_dc = pdata->cool_temp * 10;
 	else
 		chip->cool_temp_dc = INT_MIN;
-
 	if (pdata->warm_temp != INT_MIN)
 		chip->warm_temp_dc = pdata->warm_temp * 10;
 	else
 		chip->warm_temp_dc = INT_MIN;
+#else
+	if (oem_param_charger.chg_cool_tmp != INT_MIN)
+		chip->cool_temp_dc = oem_param_charger.chg_cool_tmp * 10;
+	else
+		chip->cool_temp_dc = INT_MIN;
 
+	if (oem_param_charger.chg_warm_tmp != INT_MIN)
+		chip->warm_temp_dc = oem_param_charger.chg_warm_tmp * 10;
+	else
+		chip->warm_temp_dc = INT_MIN;
+#endif
 	if (pdata->hysteresis_temp)
 		chip->hysteresis_temp_dc = pdata->hysteresis_temp * 10;
 	else
 		chip->hysteresis_temp_dc = TEMP_HYSTERISIS_DECIDEGC;
 
 	chip->temp_check_period = pdata->temp_check_period;
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	chip->max_bat_chg_current = pdata->max_bat_chg_current;
+#else
+	chip->max_bat_chg_current = oem_param_charger.i_chg_norm;
+#endif
 	/* Assign to corresponding module parameter */
 	usb_max_current = pdata->usb_max_current;
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	chip->cool_bat_chg_current = pdata->cool_bat_chg_current;
 	chip->warm_bat_chg_current = pdata->warm_bat_chg_current;
 	chip->cool_bat_voltage = pdata->cool_bat_voltage;
 	chip->warm_bat_voltage = pdata->warm_bat_voltage;
+#else
+	chip->cool_bat_chg_current = oem_param_charger.i_chg_cool;
+	chip->warm_bat_chg_current = oem_param_charger.i_chg_warm;
+	chip->cool_bat_voltage = oem_param_charger.cool_chg;
+	chip->warm_bat_voltage = oem_param_charger.warm_chg;
+#endif
 	chip->trkl_voltage = pdata->trkl_voltage;
 	chip->weak_voltage = pdata->weak_voltage;
 	chip->trkl_current = pdata->trkl_current;
 	chip->weak_current = pdata->weak_current;
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	chip->vin_min = pdata->vin_min;
+#else
+	chip->vin_min = oem_param_charger.maint_chg_vin;
+#endif
 	chip->thermal_mitigation = pdata->thermal_mitigation;
 	chip->thermal_levels = pdata->thermal_levels;
 	chip->disable_chg_rmvl_wrkarnd = pdata->disable_chg_rmvl_wrkarnd;
 
 	chip->cold_thr = pdata->cold_thr;
 	chip->hot_thr = pdata->hot_thr;
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	chip->rconn_mohm = pdata->rconn_mohm;
+#else
+	chip->rconn_mohm = oem_param_charger.rconn_mohm;
+#endif
 	chip->led_src_config = pdata->led_src_config;
 	chip->has_dc_supply = pdata->has_dc_supply;
 	chip->battery_less_hardware = pdata->battery_less_hardware;
@@ -4798,8 +5444,13 @@ static int __devinit pm8921_charger_probe(struct platform_device *pdev)
 	if (chip->battery_less_hardware)
 		charging_disabled = 1;
 
+	if (oem_param_charger.chg_disable_test == 0x01)
+		charging_disabled = 1;
+
 	chip->ibatmax_max_adj_ma = find_ibat_max_adj_ma(
 					chip->max_bat_chg_current);
+
+	vdd_max_increase_mv = oem_param_charger.vdd_max_inc_mv;
 
 	rc = pm8921_chg_hw_init(chip);
 	if (rc) {
@@ -4837,6 +5488,12 @@ static int __devinit pm8921_charger_probe(struct platform_device *pdev)
 	chip->batt_psy.num_properties = ARRAY_SIZE(msm_batt_power_props);
 	chip->batt_psy.get_property = pm_batt_power_get_property;
 	chip->batt_psy.external_power_changed = pm_batt_external_power_changed;
+	
+	chip->bms_psy.name = "bms";
+	chip->bms_psy.type = POWER_SUPPLY_TYPE_BMS;
+	chip->bms_psy.properties = msm_bms_power_props;
+	chip->bms_psy.num_properties = ARRAY_SIZE(msm_bms_power_props);
+	chip->bms_psy.get_property = pm_bms_power_get_property;
 	rc = power_supply_register(chip->dev, &chip->usb_psy);
 	if (rc < 0) {
 		pr_err("power_supply_register usb failed rc = %d\n", rc);
@@ -4855,6 +5512,12 @@ static int __devinit pm8921_charger_probe(struct platform_device *pdev)
 		goto unregister_dc;
 	}
 
+	rc = power_supply_register(chip->dev, &chip->bms_psy);
+	if (rc < 0) {
+		pr_err("power_supply_register bms failed rc = %d\n", rc);
+		goto unregister_batt;
+	}
+
 	platform_set_drvdata(pdev, chip);
 	the_chip = chip;
 
@@ -4870,16 +5533,50 @@ static int __devinit pm8921_charger_probe(struct platform_device *pdev)
 	INIT_DELAYED_WORK(&chip->update_heartbeat_work, update_heartbeat);
 	INIT_DELAYED_WORK(&chip->btc_override_work, btc_override_worker);
 
-	rc = request_irqs(chip, pdev);
+	wake_lock_init(&oem_charge_wake_lock, WAKE_LOCK_SUSPEND, "oem_charge");
+	INIT_WORK(&fast_chg_count_start_work, fast_chg_count_start_worker);
+	INIT_WORK(&fast_chg_count_stop_work, fast_chg_count_stop_worker);
+	INIT_WORK(&fast_chg_count_stop_work_usb, fast_chg_count_stop_worker_usb);
+	INIT_WORK(&chg_vbatt_ov_work, chg_vbatt_ov_worker);
+	INIT_DELAYED_WORK(&fast_chg_limit_work, fast_chg_limit_worker);
+
+	rc = pm8921_usb_ovp_set_threshold(PM_USB_OV_6V);
 	if (rc) {
-		pr_err("couldn't register interrupts rc=%d\n", rc);
+		pr_err("couldn't perform pm8921_usb_ovp_set_threshold() rc=%d\n", rc);
 		goto unregister_batt;
 	}
 
+	rc = pm8921_dc_ovp_set_threshold(PM_DC_OV_8P5V);
+	if (rc) {
+		pr_err("couldn't perform pm8921_dc_ovp_set_threshold() rc=%d\n", rc);
+		goto unregister_batt;
+	}
+
+	rc = request_irqs(chip, pdev);
+	if (rc) {
+		pr_err("couldn't register interrupts rc=%d\n", rc);
+		goto unregister_bms;
+	}
+
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	enable_irq_wake(chip->pmic_chg_irq[USBIN_VALID_IRQ]);
 	enable_irq_wake(chip->pmic_chg_irq[DCIN_VALID_IRQ]);
 	enable_irq_wake(chip->pmic_chg_irq[VBATDET_LOW_IRQ]);
 	enable_irq_wake(chip->pmic_chg_irq[FASTCHG_IRQ]);
+#else
+	rc = enable_irq_wake(chip->pmic_chg_irq[USBIN_VALID_IRQ]);
+	rc |= enable_irq_wake(chip->pmic_chg_irq[DCIN_VALID_IRQ]);
+	rc |= enable_irq_wake(chip->pmic_chg_irq[VBATDET_LOW_IRQ]);
+	rc |= enable_irq_wake(chip->pmic_chg_irq[FASTCHG_IRQ]);
+
+	rc |= enable_irq_wake(chip->pmic_chg_irq[USBIN_OV_IRQ]);
+	rc |= enable_irq_wake(chip->pmic_chg_irq[USBIN_UV_IRQ]);
+
+	if (rc) {
+		pr_err("couldn't enable wake irqs rc=%d\n", rc);
+		goto free_irq;
+	}
+#endif
 
 	create_debugfs_entries(chip);
 
@@ -4890,8 +5587,75 @@ static int __devinit pm8921_charger_probe(struct platform_device *pdev)
 		schedule_delayed_work(&chip->update_heartbeat_work,
 				      round_jiffies_relative(msecs_to_jiffies
 							(chip->update_time)));
+
+	INIT_DELAYED_WORK(&oem_charger_work, oem_charger_limit_control);
+	oem_hkadc_init();
+	oem_chargermonit_init();
+
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+	wake_lock_init(&charging_stand_wake_lock, WAKE_LOCK_SUSPEND, "charging_stand");
+	INIT_DELAYED_WORK(&oem_chg_tbatt2_work, oem_chg_tbatt2_control);
+	INIT_DELAYED_WORK(&oem_chg_det_n_work, oem_chg_det_n_control);
+	INIT_DELAYED_WORK(&oem_bat_ovp_n_work, oem_bat_ovp_n_control);
+
+	gpio_tlmm_config(GPIO_CFG(GPIO_CHG_TBATT2, 0, GPIO_CFG_INPUT, GPIO_CFG_PULL_UP, GPIO_CFG_2MA), GPIO_CFG_ENABLE);
+	gpio_tlmm_config(GPIO_CFG(GPIO_CHG_DET_N, 0, GPIO_CFG_INPUT, GPIO_CFG_PULL_UP, GPIO_CFG_2MA), GPIO_CFG_ENABLE);
+	gpio_tlmm_config(GPIO_CFG(GPIO_BAT_OVP_N, 0, GPIO_CFG_INPUT, GPIO_CFG_PULL_UP, GPIO_CFG_2MA), GPIO_CFG_ENABLE);
+
+	if (GPIO_INPUT_LO == gpio_get_value(GPIO_CHG_TBATT2)) {
+		gpio_trigger_tbatt2 = IRQF_TRIGGER_HIGH;
+	} else {
+		gpio_trigger_tbatt2 = IRQF_TRIGGER_LOW;
+		boot_stand_flag = false;
+	}
+	if (GPIO_INPUT_LO == gpio_get_value(GPIO_CHG_DET_N)) {
+		gpio_trigger_det_n = IRQF_TRIGGER_HIGH;
+	} else {
+		gpio_trigger_det_n = IRQF_TRIGGER_LOW;
+		boot_stand_flag = false;
+	}
+
+	if (boot_stand_flag) {
+		oem_tbatt2_detect = DETECT_LO_FIX;
+		oem_det_n_detect = DETECT_LO_FIX;
+		oem_stand_detect = DETECT_STAND;
+		wake_lock(&charging_stand_wake_lock);
+		oem_chg_stand_charge_timer = INTERVAL_STAND_CHG_START;
+	}
+
+	rc = request_irq(gpio_to_irq(GPIO_CHG_TBATT2), oem_chg_tbatt2_isr, gpio_trigger_tbatt2, "CHG_TBATT2", 0);
+	if (rc) {
+		pr_err("couldn't register interrupts rc=%d\n", rc);
+		goto unregister_bms;
+	}
+	rc = request_irq(gpio_to_irq(GPIO_CHG_DET_N), oem_chg_det_n_isr, gpio_trigger_det_n, "CHG_DET_N", 0);
+	if (rc) {
+		pr_err("couldn't register interrupts rc=%d\n", rc);
+		goto unregister_bms;
+	}
+	rc = request_irq(gpio_to_irq(GPIO_BAT_OVP_N), oem_bat_ovp_n_isr, IRQF_TRIGGER_LOW, "BAT_OVP_N", 0);
+	if (rc) {
+		pr_err("couldn't register interrupts rc=%d\n", rc);
+		goto unregister_bms;
+	}
+	enable_irq_wake(gpio_to_irq(GPIO_CHG_TBATT2));
+	enable_irq_wake(gpio_to_irq(GPIO_CHG_DET_N));
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+
+	chg_vbatt_ov_check_charger();
+
+	if (pm_chg_get_rt_status(the_chip, USBIN_VALID_IRQ)) {
+		wake_lock(&oem_charge_wake_lock);
+	}
+
+	pr_info("OK\n");
+
 	return 0;
 
+free_irq:
+	free_irqs(chip);
+unregister_bms:
+	power_supply_unregister(&chip->bms_psy);
 unregister_batt:
 	wake_lock_destroy(&chip->eoc_wake_lock);
 	power_supply_unregister(&chip->batt_psy);
@@ -4907,6 +5671,9 @@ free_chip:
 static int __devexit pm8921_charger_remove(struct platform_device *pdev)
 {
 	struct pm8921_chg_chip *chip = platform_get_drvdata(pdev);
+
+	oem_hkadc_exit();
+	oem_chargermonit_exit();
 
 	free_irqs(chip);
 	platform_set_drvdata(pdev, NULL);
@@ -4947,3 +5714,2974 @@ MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("PMIC8921 charger/battery driver");
 MODULE_VERSION("1.0");
 MODULE_ALIAS("platform:" PM8921_CHARGER_DEV_NAME);
+
+int oem_pm8921_disable_source_current(bool disable)
+{
+	int ret;
+	int usb_ma;
+
+	if (disable) {
+		pm_chg_iusbmax_get(the_chip, &usb_ma);
+		if (usb_ma > 1000)
+			__pm8921_charger_vbus_draw(1000);
+		mdelay(1);
+		if (usb_ma > 500)
+			__pm8921_charger_vbus_draw(500);
+		mdelay(1);
+}
+
+	ret = pm8921_disable_source_current(disable);
+	if (ret) {
+		pr_err("buck converter setting error %d\n", ret);
+		return ret;
+	}
+
+	if (disable) {
+		oem_pm8921_disable_source_current_flag = 1;
+	}
+	else {
+		if(oem_iusbmax_current == OEM_IUSBMAX_NOT_SET) {
+			pr_err("oem_iusbmax_current is not set\n");
+		}
+		else {
+			usb_target_ma = oem_iusbmax_current;
+			pm8921_charger_vbus_draw(oem_iusbmax_current);
+		}
+	}
+
+	return ret;
+}
+
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+static int oem_chg_stand_off(void);
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+static void fast_chg_limit_worker(struct work_struct *work)
+{
+	int ret;
+
+	pr_debug("fast_chg_limit_worker() called.\n");
+
+	is_oem_fast_chg_counting=false;
+
+	if (1 == oem_charge_stand_flag) {
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+		oem_chg_stand_off();
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+		schedule_work(&fast_chg_count_start_work);
+	}else{
+		is_oem_fast_chg_expired=true;
+
+		if (OEM_STATUS_LIMIT == oem_charge_status) {
+			oem_charge_status = OEM_STATUS_NORMAL;
+			cancel_delayed_work_sync(&oem_charger_work);
+		}
+
+		ret = oem_pm8921_disable_source_current(false);
+		if (ret) {
+			pr_err("error buck converter setting value %d\n", ret);
+		}
+
+		ret = pm_chg_auto_enable(the_chip, false);
+		if (ret) {
+			pr_err("error bat_fet setting value %d\n", ret);
+		}
+	}
+
+}
+
+#define EOC_CHECK_VOLTAGE_DELTA	100
+static int oem_get_vbatdet_low(struct pm8921_chg_chip *chip)
+{
+	int battery_voltage;
+	int set_voltage_mv;
+	int ret;
+
+	ret = oem_hkadc_master_data_read(POWER_SUPPLY_PROP_VOLTAGE_NOW, &battery_voltage);
+	if (ret) {
+		pr_err("Failed to reading battery voltage, ret = %d\n", ret);
+		return 1;
+	}
+
+	if (chip->is_bat_warm) {
+		set_voltage_mv = chip->warm_bat_voltage;
+	} else if (chip->is_bat_cool) {
+		set_voltage_mv = chip->cool_bat_voltage;
+	} else {
+		set_voltage_mv = chip->max_voltage_mv;
+	}
+
+	if (battery_voltage >= ((set_voltage_mv - EOC_CHECK_VOLTAGE_DELTA) * 1000)) {
+		return 0;
+	} else {
+		return 1;
+	}
+}
+
+static uint32_t *uim_status_smem_ptr = NULL;
+static void oem_uim_smem_init(void)
+{
+	uim_status_smem_ptr = (uint32_t *)kc_smem_alloc(SMEM_UICC_INFO, 1);
+	if (NULL == uim_status_smem_ptr) {
+		pr_err("oem_uim_smem_init() smem uicc read error.\n");
+		return;
+	}
+}
+
+static bool is_oem_uim_status(void)
+{
+	if (NULL == uim_status_smem_ptr)
+	{
+		pr_err("is_oem_uim_status() smem uicc read error.\n");
+		return false;
+	}
+
+	if ((0 == *uim_status_smem_ptr) || (1 == *uim_status_smem_ptr))
+	{
+		return true;
+	}
+	return false;
+}
+
+static void oem_uim_check(unsigned int* max_voltage_normal)
+{
+	if (oem_option_item1_bit4) {
+		charge_uim_valid = 1;
+		*max_voltage_normal = oem_param_charger.normal_chg;
+		return;
+	}
+
+	if (!is_oem_uim_status()) {
+		charge_uim_valid = 0;
+		*max_voltage_normal = oem_param_charger.uim_undete_chg;
+	} else {
+		charge_uim_valid = 1;
+		*max_voltage_normal = oem_param_charger.normal_chg;
+		}
+	return;
+}
+
+static int oem_call_state = 0;
+module_param(oem_call_state, int, 0644);
+
+#define OEM_CHARGE_FACT_LIMIT_TEMP 90
+#define OEM_CHARGE_FACT_STOP_TEMP  95
+
+#define OEM_CORRECTION_VALUE \
+	(oem_charge_stand_flag ? (oem_param_charger.chg_adp_tmp_delta) : 0)
+
+#define OEM_INTE_CAM_ON_TELE_ON   (30)
+#define OEM_INTE_CAM_OFF_TELE_ON  (27)
+
+static uint32_t camera_therm_status = OEM_STATUS_NORMAL;
+static void oem_camera_therm_set_status(int temp)
+{
+	int8_t correction_value = OEM_CORRECTION_VALUE;
+	int32_t chg_cam_tmp_off_work;
+	int32_t chg_inte_cam_on_work;
+	int32_t chg_inte_cam_off_work;
+
+	if (oem_option_item1_bit3) {
+		chg_inte_cam_on_work = OEM_CHARGE_FACT_LIMIT_TEMP;
+		chg_inte_cam_off_work = oem_param_charger.chg_inte_cam_off + correction_value;
+		chg_cam_tmp_off_work = OEM_CHARGE_FACT_STOP_TEMP;
+	} else  {
+		if (oem_call_state == 1) {
+			chg_inte_cam_on_work = OEM_INTE_CAM_ON_TELE_ON;
+			chg_inte_cam_off_work = OEM_INTE_CAM_OFF_TELE_ON;
+		} else {
+			chg_inte_cam_on_work = oem_param_charger.chg_inte_cam_on + correction_value;
+			chg_inte_cam_off_work = oem_param_charger.chg_inte_cam_off + correction_value;
+		}
+		chg_cam_tmp_off_work = oem_param_charger.chg_cam_tmp_off + correction_value;
+	}
+
+	switch (camera_therm_status) {
+
+	case OEM_STATUS_NORMAL:
+		if (chg_cam_tmp_off_work <= temp) {
+			camera_therm_status = OEM_STATUS_STOP;
+		} else if (chg_inte_cam_on_work <= temp) {
+			camera_therm_status = OEM_STATUS_LIMIT;
+		} else {
+			camera_therm_status = OEM_STATUS_NORMAL;
+	}
+		break;
+
+	case OEM_STATUS_LIMIT:
+		if (chg_inte_cam_off_work >= temp) {
+			camera_therm_status = OEM_STATUS_NORMAL;
+		} else if (chg_cam_tmp_off_work <= temp) {
+			camera_therm_status = OEM_STATUS_STOP;
+		} else {
+			camera_therm_status = OEM_STATUS_LIMIT;
+		}
+		break;
+
+	case OEM_STATUS_STOP:
+		if (chg_inte_cam_off_work >= temp) {
+			camera_therm_status = OEM_STATUS_NORMAL;
+		} else if (oem_param_charger.chg_cam_tmp_on + correction_value >= temp) {
+			camera_therm_status = OEM_STATUS_LIMIT;
+		} else {
+			camera_therm_status = OEM_STATUS_STOP;
+		}
+		break;
+
+	default:
+		break;
+	}
+
+	pr_debug("camera_temp = %d, camera_therm_status = %d\n", temp, camera_therm_status);
+	}
+
+#define OEM_INTE_PHONE_ON_TELE_ON   (37)
+#define OEM_INTE_PHONE_OFF_TELE_ON  (34)
+
+static uint32_t substrate_therm_status = OEM_STATUS_NORMAL;
+static void oem_substrate_therm_set_status(int temp)
+{
+	int8_t correction_value = OEM_CORRECTION_VALUE;
+	int32_t chg_phone_tmp_off_work;
+	int32_t chg_inte_phone_on_work;
+	int32_t chg_inte_phone_off_work;
+
+	if (oem_option_item1_bit3) {
+		chg_inte_phone_on_work = OEM_CHARGE_FACT_LIMIT_TEMP;
+		chg_inte_phone_off_work = oem_param_charger.chg_inte_phone_off + correction_value;
+		chg_phone_tmp_off_work = OEM_CHARGE_FACT_STOP_TEMP;
+	} else  {
+		if (oem_call_state == 1) {
+			chg_inte_phone_on_work = OEM_INTE_PHONE_ON_TELE_ON;
+			chg_inte_phone_off_work = OEM_INTE_PHONE_OFF_TELE_ON;
+		} else {
+			chg_inte_phone_on_work = oem_param_charger.chg_inte_phone_on + correction_value;
+			chg_inte_phone_off_work = oem_param_charger.chg_inte_phone_off + correction_value;
+		}
+		chg_phone_tmp_off_work = oem_param_charger.chg_phone_tmp_off + correction_value;
+}
+
+	switch (substrate_therm_status) {
+
+	case OEM_STATUS_NORMAL:
+		if (chg_phone_tmp_off_work <= temp) {
+			substrate_therm_status = OEM_STATUS_STOP;
+		} else if (chg_inte_phone_on_work <= temp) {
+			substrate_therm_status = OEM_STATUS_LIMIT;
+		} else {
+			substrate_therm_status = OEM_STATUS_NORMAL;
+}
+		break;
+
+	case OEM_STATUS_LIMIT:
+		if (chg_inte_phone_off_work >= temp) {
+			substrate_therm_status = OEM_STATUS_NORMAL;
+		} else if (chg_phone_tmp_off_work <= temp) {
+			substrate_therm_status = OEM_STATUS_STOP;
+		} else {
+			substrate_therm_status = OEM_STATUS_LIMIT;
+		}
+		break;
+
+	case OEM_STATUS_STOP:
+		if (chg_inte_phone_off_work >= temp) {
+			substrate_therm_status = OEM_STATUS_NORMAL;
+		} else if (oem_param_charger.chg_phone_tmp_on + correction_value >= temp) {
+			substrate_therm_status = OEM_STATUS_LIMIT;
+		} else {
+			substrate_therm_status = OEM_STATUS_STOP;
+		}
+		break;
+
+	default:
+		break;
+	}
+
+	pr_debug("substrate_temp = %d, substrate_therm_status = %d\n", temp, substrate_therm_status);
+}
+
+#define OEM_USB_THERM_NORM_TO_STOP_TEMP  90
+#define OEM_USB_THERM_STOP_TO_NORM_TEMP  50
+static uint32_t usb_therm_status = OEM_STATUS_NORMAL;
+static void oem_usb_therm_set_status(int temp)
+{
+	switch (usb_therm_status) {
+
+	case OEM_STATUS_NORMAL:
+		if (OEM_USB_THERM_NORM_TO_STOP_TEMP <= temp) {
+			usb_therm_status = OEM_STATUS_STOP;
+		} else {
+			usb_therm_status = OEM_STATUS_NORMAL;
+		}
+		break;
+
+	case OEM_STATUS_LIMIT:
+		break;
+
+	case OEM_STATUS_STOP:
+		if (OEM_USB_THERM_STOP_TO_NORM_TEMP >= temp) {
+			usb_therm_status = OEM_STATUS_NORMAL;
+		} else {
+			usb_therm_status = OEM_STATUS_STOP;
+		}
+		break;
+
+	default:
+		break;
+	}
+
+	pr_debug("usb_temp = %d, usb_therm_status = %d\n", temp, usb_therm_status);
+}
+
+static uint32_t battery_temp_status = OEM_STATUS_NORMAL;
+static void oem_battery_temp_set_status(int temp)
+{
+	int16_t wait_chg_on_work;
+
+	if (oem_option_item1_bit3) {
+		wait_chg_on_work = OEM_CHARGE_FACT_STOP_TEMP * 10;
+	} else  {
+		wait_chg_on_work = oem_param_charger.wait_chg_on * 10;
+	}
+
+	switch (battery_temp_status) {
+
+	case OEM_STATUS_NORMAL:
+		if (wait_chg_on_work <= temp) {
+			battery_temp_status = OEM_STATUS_LIMIT;
+		} else {
+			battery_temp_status = OEM_STATUS_NORMAL;
+		}
+		break;
+
+	case OEM_STATUS_LIMIT:
+		if ((oem_param_charger.wait_chg_off * 10) >= temp) {
+			battery_temp_status = OEM_STATUS_NORMAL;
+		} else {
+			battery_temp_status = OEM_STATUS_LIMIT;
+		}
+		break;
+
+	case OEM_STATUS_STOP:
+		break;
+
+	default:
+		break;
+	}
+
+	pr_debug("battery_temp = %d, battery_temp_status = %d\n", temp, battery_temp_status);
+}
+
+#define CHARGE_STAND_LIMIT_VOLTAGE  4100
+#define OEM_BATTERY_VOLTS_CORRECTION_VALUE \
+	(oem_charge_stand_flag ? CHARGE_STAND_LIMIT_VOLTAGE : (oem_param_charger.maint_wait_chg_on_volt))
+static uint32_t vbatt_status = OEM_STATUS_NORMAL;
+static void oem_battery_volts_set_status(int vbat)
+{
+	switch (vbatt_status) {
+
+	case OEM_STATUS_NORMAL:
+
+		if ((OEM_BATTERY_VOLTS_CORRECTION_VALUE * 1000) <= vbat) {
+			vbatt_status = OEM_STATUS_LIMIT;
+		} else {
+			vbatt_status = OEM_STATUS_NORMAL;
+		}
+		break;
+
+	case OEM_STATUS_LIMIT:
+		if ((oem_param_charger.maint_wait_chg_off_volt * 1000) >= vbat) {
+			vbatt_status = OEM_STATUS_NORMAL;
+		} else {
+			vbatt_status = OEM_STATUS_LIMIT;
+		}
+		break;
+
+	case OEM_STATUS_STOP:
+		break;
+
+	default:
+		break;
+	}
+
+	pr_debug("battery_vol = %d, vbatt_status = %d\n", vbat, vbatt_status);
+}
+
+static void oem_charger_limit_control(struct work_struct *work)
+{
+	unsigned int charger_control_timer;
+
+	if ((!pm_chg_get_rt_status(the_chip, FASTCHG_IRQ)) &&
+	    (1 != oem_pm8921_disable_source_current_flag)) {
+		oem_charge_status = OEM_STATUS_NORMAL;
+		return;
+	}
+
+	if (0 != oem_charger_control_flag) {
+		oem_pm8921_disable_source_current(false);
+		oem_charger_control_flag = 0;
+		charger_control_timer = oem_param_charger.maint_wait_chg_on_time * 1000;
+	} else {
+		oem_last_batt_status = get_prop_batt_status(the_chip);
+		oem_last_charge_type = get_prop_charge_type(the_chip);
+		oem_last_dc_present = the_chip->dc_present;
+		oem_last_usb_present = the_chip->usb_present;
+		oem_pm8921_disable_source_current(true);
+		oem_charger_control_flag = 1;
+		charger_control_timer = oem_param_charger.maint_wait_chg_off_time * 1000;
+	}
+
+	schedule_delayed_work(&oem_charger_work,
+			round_jiffies_relative(msecs_to_jiffies(charger_control_timer)));
+}
+
+static int oem_charger_limit_control_check(int enable)
+{
+	if(1 == enable) {
+		if (OEM_STATUS_LIMIT != oem_charge_status) {
+			oem_charger_control_flag = 1;
+			schedule_delayed_work(&oem_charger_work,
+					round_jiffies_relative(msecs_to_jiffies(0)));
+		}
+	} else if (0 == enable) {
+		if (OEM_STATUS_LIMIT == oem_charge_status) {
+			cancel_delayed_work_sync(&oem_charger_work);
+			oem_pm8921_disable_source_current(false);
+		}
+	} else {
+		pr_err("Out of range : enable = %d\n", enable);
+		return -EINVAL;
+
+	}
+	return 0;
+}
+
+static int oem_batt_health = POWER_SUPPLY_HEALTH_GOOD;
+static void oem_charger_monitor(void)
+{
+	if (((the_chip->usb_present || the_chip->dc_present)) &&
+	    ((POWER_SUPPLY_STATUS_CHARGING == get_prop_batt_status(the_chip)) ||
+	    (OEM_STATUS_NORMAL != oem_charge_status))) {
+
+		if ((OEM_STATUS_STOP == camera_therm_status) &&
+		    (OEM_STATUS_STOP == substrate_therm_status)) {
+			if (OEM_STATUS_STOP != oem_charge_status) {
+				cancel_delayed_work_sync(&oem_charger_work);
+				oem_pm8921_disable_source_current(true);
+				oem_charge_status = OEM_STATUS_STOP;
+			}
+
+		}else if (OEM_STATUS_STOP == usb_therm_status) {
+			if (OEM_STATUS_STOP != oem_charge_status) {
+				cancel_delayed_work_sync(&oem_charger_work);
+				oem_pm8921_disable_source_current(true);
+				oem_charge_status = OEM_STATUS_STOP;
+			}
+
+		}else if ((POWER_SUPPLY_HEALTH_OVERHEAT == oem_batt_health) ||
+		          (POWER_SUPPLY_HEALTH_COLD == oem_batt_health)) {
+				if (OEM_STATUS_STOP != oem_charge_status) {
+					cancel_delayed_work_sync(&oem_charger_work);
+					oem_charge_status = OEM_STATUS_STOP;
+				}
+
+		} else {
+			if (OEM_STATUS_STOP == oem_charge_status) {
+				oem_charge_status = OEM_STATUS_NORMAL;
+				oem_pm8921_disable_source_current(false);
+			}
+
+			if ((((OEM_STATUS_LIMIT <= camera_therm_status) &&
+			      (OEM_STATUS_LIMIT <= substrate_therm_status)) ||
+			      (OEM_STATUS_LIMIT == battery_temp_status)) &&
+			      (OEM_STATUS_LIMIT == vbatt_status)) {
+				oem_charger_limit_control_check(1);
+				oem_charge_status = OEM_STATUS_LIMIT;
+
+			} else {
+				oem_charger_limit_control_check(0);
+				oem_charge_status = OEM_STATUS_NORMAL;
+			}
+		}
+
+	} else if (OEM_STATUS_NORMAL != oem_charge_status) {
+		if (OEM_STATUS_LIMIT == oem_charge_status) {
+			cancel_delayed_work_sync(&oem_charger_work);
+		}
+		oem_pm8921_disable_source_current(false);
+		oem_charge_status = OEM_STATUS_NORMAL;
+	}
+
+	pr_debug("oem_charge_status = %d\n", oem_charge_status);
+
+	return;
+}
+
+static int oem_adc_read;
+static int oem_adc_read_cmd(const char *val, struct kernel_param *kp)
+{
+	int ret;
+	struct pm8xxx_adc_chan_result result;
+
+	ret = param_set_int(val, kp);
+	if (ret) {
+		pr_err("error setting value %d\n", ret);
+		return ret;
+	}
+
+	ret = pm8xxx_adc_read(oem_adc_read, &result);
+
+	pr_info("channel = %d physical = %lld raw = %d",
+			oem_adc_read, result.physical, result.adc_code);
+
+	return 0;
+}
+module_param_call(oem_adc_read, oem_adc_read_cmd,
+					param_get_uint, &oem_adc_read, 0644);
+
+static int oem_ibatt_set_param;
+static int oem_ibatt_get_param;
+static int oem_ibatt_set_read_cmd(const char *val, struct kernel_param *kp)
+{
+	int result_ua = 0;
+	int rc = 0;
+
+	rc = pm8921_bms_get_battery_current(&result_ua);
+	if (rc) {
+		oem_ibatt_set_param = -EINVAL;
+	} else {
+		oem_ibatt_set_param = result_ua;
+	}
+
+	return 0;
+}
+static int oem_ibatt_get_read_cmd(char *buffer, struct kernel_param *kp)
+{
+
+	int res = 0;
+
+	res = snprintf(buffer, 16, "%d", oem_ibatt_set_param);
+
+	return res;
+}
+module_param_call(oem_ibatt_get_param, oem_ibatt_set_read_cmd,
+					oem_ibatt_get_read_cmd, &oem_ibatt_get_param, 0644);
+
+static int oem_charge_back_ctrl;
+static int oem_charge_back_ctrl_cmd(const char *val, struct kernel_param *kp)
+{
+	int ret;
+
+	ret = param_set_int(val, kp);
+	if (ret) {
+		pr_err("error setting value %d\n", ret);
+		return ret;
+	}
+
+	if ((0 == oem_charge_back_ctrl) || (1 == oem_charge_back_ctrl)) {
+		ret = pm8921_disable_source_current(oem_charge_back_ctrl);
+	} else {
+		pr_err("Out of range %d \n", oem_charge_back_ctrl);
+		ret = -EINVAL;
+	}
+	return ret;
+}
+module_param_call(oem_charge_back_ctrl, oem_charge_back_ctrl_cmd,
+					param_get_uint, &oem_charge_back_ctrl, 0644);
+
+static int oem_auto_charger_ctrl;
+static int oem_auto_charger_ctrl_cmd(const char *val, struct kernel_param *kp)
+{
+	int ret;
+
+	ret = param_set_int(val, kp);
+	if (ret) {
+		pr_err("error setting value %d\n", ret);
+		return ret;
+	}
+
+	if ((0 == oem_auto_charger_ctrl) || (1 == oem_auto_charger_ctrl)) {
+		ret = pm_chg_auto_enable(the_chip, !oem_auto_charger_ctrl);
+	} else {
+		pr_err("Out of range %d \n", oem_auto_charger_ctrl);
+		ret = -EINVAL;
+	}
+	return ret;
+}
+module_param_call(oem_auto_charger_ctrl, oem_auto_charger_ctrl_cmd,
+					param_get_uint, &oem_auto_charger_ctrl, 0644);
+
+static struct delayed_work	oem_hkadc_work;
+static int oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_NUM];
+static int oem_charger_connect_state = POWER_SUPPLY_OEM_CONNECT_NONE;
+
+static int vbat_work[HKADC_VBAT_VOLTS_ELEMENT_COUNT]={0};
+static int bat_temp_work[HKADC_BAT_TEMP_ELEMENT_COUNT]={0};
+static int ibat_work[HKADC_IBAT_CURRENT_ELEMENT_COUNT]={0};
+static int pa_therm_work[HKADC_PA_THERM_ELEMENT_COUNT]={0};
+static int camera_therm_work[HKADC_CAMERA_TEMP_ELEMENT_COUNT]={0};
+static int substrate_therm_work[HKADC_SUBSTRATE_THERM_ELEMENT_COUNT]={0};
+static int usb_therm_work[HKADC_USB_THERM_ELEMENT_COUNT]={0};
+
+static struct alarm androidalarm;
+static struct timespec androidalarm_interval_timespec;
+struct early_suspend hkadc_early_suspend;
+struct wake_lock oem_hkadc_wake_lock;
+
+static int pa_therm_monit_freq = 0;
+static int camera_temp_monit_freq = 0;
+static int substrate_therm_monit_freq = 0;
+static int usb_therm_monit_freq = 0;
+
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+static int oem_chg_stand_charge_timer = 0;
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+
+static atomic_t is_hkadc_initialized=ATOMIC_INIT(0);
+static atomic_t is_chargermonit_initialized=ATOMIC_INIT(0);
+
+static void oem_hkadc_master_data_write(enum power_supply_property psp, int val)
+{
+	int* masterdata;
+
+	switch(psp){
+	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+		masterdata
+		 = &oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_BAT_VOLTAGE];
+		break;
+
+	case POWER_SUPPLY_PROP_CURRENT_NOW:
+		masterdata
+		 = &oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_BAT_CURRENT];
+		break;
+
+	case POWER_SUPPLY_PROP_TEMP:
+		masterdata
+		 = &oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_BAT_THERM];
+		break;
+
+	case POWER_SUPPLY_PROP_OEM_PA_THERM:
+		masterdata
+		 = &oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_PA_THERM];
+		break;
+
+	case POWER_SUPPLY_PROP_OEM_CAMERA_THERM:
+		masterdata
+		 = &oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_CAMERA_THERM];
+		break;
+
+	case POWER_SUPPLY_PROP_OEM_SUBSTRATE_THERM:
+		masterdata
+		 = &oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_SUBSTRATE_THERM];
+		break;
+
+	case POWER_SUPPLY_PROP_OEM_USB_THERM:
+		masterdata
+		 = &oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_USB_THERM];
+		break;
+
+	default:
+		masterdata = NULL;
+		break;
+	}
+
+	if (masterdata != NULL){
+		MASTERDATA_LOCK();
+		*masterdata = val;
+		MASTERDATA_UNLOCK();
+	}
+
+}
+static void oem_charger_master_data_write(enum power_supply_property psp, int val)
+{
+	int* masterdata;
+
+	switch(psp){
+	case POWER_SUPPLY_PROP_OEM_CHARGE_CONNECT_STATE:
+		masterdata
+		 = &oem_charger_connect_state;
+		break;
+
+	default:
+		masterdata = NULL;
+		break;
+	}
+
+	if (masterdata != NULL){
+		MASTERDATA_LOCK();
+		*masterdata = val;
+		MASTERDATA_UNLOCK();
+	}
+
+}
+
+static int oem_hkadc_master_data_read(enum power_supply_property psp, int *intval)
+{
+	int ret = 0;
+	int initialized;
+	int* masterdata;
+
+	initialized = atomic_read(&is_hkadc_initialized);
+
+	if (!initialized) {
+		pr_err("called before init\n");
+		MASTERDATA_LOCK();
+		*intval = 0;
+		MASTERDATA_UNLOCK();
+		return -EAGAIN;
+	}
+
+	switch(psp){
+	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+		masterdata =
+		 &oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_BAT_VOLTAGE];
+		break;
+
+	case POWER_SUPPLY_PROP_CURRENT_NOW:
+		masterdata =
+		 &oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_BAT_CURRENT];
+		break;
+
+	case POWER_SUPPLY_PROP_TEMP:
+		masterdata =
+		 &oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_BAT_THERM];
+		break;
+
+	case POWER_SUPPLY_PROP_OEM_PA_THERM:
+		masterdata =
+		 &oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_PA_THERM];
+		break;
+
+	case POWER_SUPPLY_PROP_OEM_CAMERA_THERM:
+		masterdata =
+		 &oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_CAMERA_THERM];
+		break;
+
+	case POWER_SUPPLY_PROP_OEM_SUBSTRATE_THERM:
+		masterdata =
+		 &oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_SUBSTRATE_THERM];
+		break;
+
+	case POWER_SUPPLY_PROP_OEM_USB_THERM:
+		masterdata =
+		 &oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_USB_THERM];
+		break;
+
+	default:
+		masterdata = NULL;
+		break;
+	}
+
+	if (masterdata != NULL){
+		MASTERDATA_LOCK();
+		*intval = *masterdata;
+		MASTERDATA_UNLOCK();
+	}else{
+		pr_debug("Out of range psp %d \n", psp);
+		ret = -EINVAL;
+	}
+
+	return ret;
+
+}
+
+static int oem_charger_master_data_read(enum power_supply_property psp, int *intval)
+{
+	int ret = 0;
+	int initialized;
+	int* masterdata;
+
+	initialized = atomic_read(&is_chargermonit_initialized);
+
+	if (!initialized) {
+		pr_err("called before init\n");
+		*intval = 0;
+		return -EAGAIN;
+	}
+
+	switch(psp){
+	case POWER_SUPPLY_PROP_OEM_CHARGE_CONNECT_STATE:
+		masterdata = &oem_charger_connect_state;
+		break;
+
+	default:
+		masterdata = NULL;
+		break;
+	}
+
+	if (masterdata != NULL){
+		MASTERDATA_LOCK();
+		*intval = *masterdata;
+		MASTERDATA_UNLOCK();
+	}else{
+		pr_debug("Out of range psp %d \n", psp);
+		ret = -EINVAL;
+	}
+
+	return ret;
+
+}
+
+#define HKADC_BATT_DEFAULT_VOLTAGE	3600000
+static int oem_hkadc_init_battery_uvolts(void)
+{
+	int rc;
+	int work=0;
+	int cnt;
+	struct pm8xxx_adc_chan_result result;
+
+	if (!the_chip) {
+		pr_err("called before init\n");
+		return -EINVAL;
+	}
+	rc = pm8xxx_adc_read(the_chip->vbat_channel, &result);
+	if (rc) {
+		pr_err("error reading adc channel = %d, rc = %d\n",
+					the_chip->vbat_channel, rc);
+		work = HKADC_BATT_DEFAULT_VOLTAGE;
+	}else{
+		work = (int)result.physical;
+	}
+	for (cnt=0;cnt<HKADC_VBAT_VOLTS_ELEMENT_COUNT;cnt++) {
+		vbat_work[cnt] = work;
+	}
+
+	oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_BAT_VOLTAGE] = work;
+
+	pr_debug("init hkadc uvolts = %d \n",
+		oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_BAT_VOLTAGE]);
+
+	return 0;
+}
+
+static int oem_hkadc_get_battery_uvolts(int *vbat)
+{
+	int rc;
+	int work=0;
+	int max=0, min=0;
+	int total=0;
+	int cnt;
+	int average;
+	struct pm8xxx_adc_chan_result result;
+
+	if (!the_chip) {
+		pr_err("called before init\n");
+		return -EINVAL;
+	}
+	rc = pm8xxx_adc_read(the_chip->vbat_channel, &result);
+	if (rc) {
+		pr_err("error reading adc channel = %d, rc = %d\n",
+					the_chip->vbat_channel, rc);
+		rc = oem_hkadc_master_data_read(POWER_SUPPLY_PROP_VOLTAGE_NOW, vbat);
+		pr_debug("hkadc get volt vbat do not updated. %d %d\n", rc, *vbat);
+		return rc;
+	}
+	work = (int)result.physical;
+	for (cnt=0;cnt<HKADC_VBAT_VOLTS_ELEMENT_COUNT-1;cnt++) {
+		vbat_work[cnt] = vbat_work[cnt+1];
+		total = total + vbat_work[cnt];
+	}
+	vbat_work[cnt] = work;
+	total = total + vbat_work[cnt];
+
+	max = vbat_work[0];
+	min = vbat_work[0];
+	for (cnt=0;cnt<HKADC_VBAT_VOLTS_ELEMENT_COUNT;cnt++) {
+		if (max < vbat_work[cnt]) {
+			max = vbat_work[cnt];
+		} else if (min > vbat_work[cnt]) {
+			min = vbat_work[cnt];
+		}
+	}
+
+	average = (total - max - min) / (HKADC_VBAT_VOLTS_ELEMENT_COUNT-2);
+	oem_hkadc_master_data_write(POWER_SUPPLY_PROP_VOLTAGE_NOW, average);
+	*vbat = average;
+	pr_debug("hkadc volt  total = %d max = %d min = %d \n", total, max, min);
+	pr_debug("hkadc uvolts = %d   %d %d %d %d %d \n", 
+		average,
+		vbat_work[0],
+		vbat_work[1],
+		vbat_work[2],
+		vbat_work[3],
+		vbat_work[4]);
+
+	return 0;
+}
+
+static int oem_hkadc_get_wakeup_battery_uvolts(int *vbat)
+{
+	int rc;
+	int cnt;
+	int ngcnt;
+	int vbat_new=0;
+	int max=0, min=0;
+	int total=0;
+	int average;
+	int vbat_work_tmp[HKADC_VBAT_VOLTS_ELEMENT_COUNT];
+	struct pm8xxx_adc_chan_result result;
+
+	if (!the_chip) {
+		pr_err("called before init\n");
+		return -EINVAL;
+	}
+
+	ngcnt = 0;
+	for (cnt=0;cnt<HKADC_VBAT_VOLTS_ELEMENT_COUNT;cnt++) {
+		rc = pm8xxx_adc_read(the_chip->vbat_channel, &result);
+		if (rc) {
+			pr_err("error reading adc channel = %d, rc = %d\n",
+						the_chip->vbat_channel, rc);
+			ngcnt++;
+		}else{
+			vbat_new = (int)result.physical;
+			vbat_work_tmp[cnt] = (int)result.physical;
+		}
+	}
+	if (ngcnt == 0){
+		for (cnt=0;cnt<HKADC_VBAT_VOLTS_ELEMENT_COUNT;cnt++) {
+			vbat_work[cnt]=vbat_work_tmp[cnt];
+			total = total + vbat_work_tmp[cnt];
+		}
+		max = vbat_work[0];
+		min = vbat_work[0];
+		for (cnt=0;cnt<HKADC_VBAT_VOLTS_ELEMENT_COUNT;cnt++) {
+			if (max < vbat_work[cnt]) {
+				max = vbat_work[cnt];
+			} else if (min > vbat_work[cnt]) {
+				min = vbat_work[cnt];
+			}
+		}
+
+		average = (total - max - min) / (HKADC_VBAT_VOLTS_ELEMENT_COUNT-2);
+		oem_hkadc_master_data_write(POWER_SUPPLY_PROP_VOLTAGE_NOW, average);
+		*vbat = average;
+		pr_debug("hkadc wakeup volt  total = %d max = %d min = %d \n", total, max, min);
+		pr_debug("hkadc wakeup uvolts = %d   %d %d %d %d %d \n", 
+			average,
+			vbat_work[0],
+			vbat_work[1],
+			vbat_work[2],
+			vbat_work[3],
+			vbat_work[4]);
+	}else if (ngcnt < HKADC_VBAT_VOLTS_ELEMENT_COUNT){
+		for (cnt=0;cnt<HKADC_VBAT_VOLTS_ELEMENT_COUNT;cnt++) {
+			vbat_work[cnt] = vbat_new;
+		}
+		oem_hkadc_master_data_write(POWER_SUPPLY_PROP_VOLTAGE_NOW, vbat_new);
+		*vbat = vbat_new;
+		pr_debug("hkadc wakeup volt vbat_new = %d\n", vbat_new);
+	}else{
+		rc = oem_hkadc_master_data_read(POWER_SUPPLY_PROP_VOLTAGE_NOW, vbat);
+		pr_debug("hkadc wakeup volt vbat do not updated. %d %d\n", rc, *vbat);
+	}
+
+	return 0;
+}
+
+static void oem_charger_perform_battery_detection_state(void)
+{
+	int ret;
+
+	if (oem_option_item1_bit0){
+		if (is_batterydetected){
+			ret = oem_pm8921_disable_source_current(false);
+			if (ret) {
+				pr_err("error buck converter setting value %d\n", ret);
+			}
+		}else{
+			ret = oem_pm8921_disable_source_current(true);
+			if (ret) {
+				pr_err("error buck converter setting value %d\n", ret);
+			}
+		}
+	}else{
+		if (!is_batterydetected){
+			kernel_power_off();
+		}
+	}
+}
+
+#define CHG_BATT_DETECTION_TEMP		-330
+#define CHG_BATT_DETECTION_INTERVAL	10
+#define CHG_BATT_DETECTION_NUM		5
+static void oem_charger_init_batterydetectionstate(int battemp)
+{
+	if ((battemp) > CHG_BATT_DETECTION_TEMP) {
+		is_batterydetected = true;
+	
+	}else{
+		is_batterydetected = false;
+	}
+}
+
+static void oem_charger_check_battery_detection_state(void)
+{
+	int i;
+	int temp;
+	int rc;
+	struct pm8xxx_adc_chan_result result;
+
+	rc = pm8xxx_adc_read(the_chip->batt_temp_channel, &result);
+	if (rc) {
+		pr_err("error reading adc channel = %d, rc = %d\n",
+					the_chip->batt_temp_channel, rc);
+		temp = CHG_BATT_DETECTION_TEMP;
+	}else{
+		temp = (int)result.physical;
+	}
+	if ((temp) > CHG_BATT_DETECTION_TEMP) {
+		if (is_batterydetected == false){
+			for (i=0 ; i<CHG_BATT_DETECTION_NUM ; i++){
+				mdelay(CHG_BATT_DETECTION_INTERVAL);
+				rc = pm8xxx_adc_read(the_chip->batt_temp_channel, &result);
+				if (rc) {
+					pr_err("error reading adc channel = %d, rc = %d\n",
+								the_chip->batt_temp_channel, rc);
+					break;
+				}
+				temp = (int)result.physical;
+				if ((temp) <= CHG_BATT_DETECTION_TEMP){
+					pr_debug("check batterydetectionstate inserted fail:%d\n", i);
+					break;
+				}
+				pr_debug("check batterydetectionstate inserted count %d\n", i);
+			}
+
+			if (i >= CHG_BATT_DETECTION_NUM){
+				is_batterydetected = true;
+				oem_charger_perform_battery_detection_state();
+				pr_debug("batterydetectionstate inserted.\n");
+			}
+		}
+	}else{
+		if (is_batterydetected == true){
+			for (i=0 ; i<CHG_BATT_DETECTION_NUM ; i++){
+				mdelay(CHG_BATT_DETECTION_INTERVAL);
+				rc = pm8xxx_adc_read(the_chip->batt_temp_channel, &result);
+				if (rc) {
+					pr_err("error reading adc channel = %d, rc = %d\n",
+								the_chip->batt_temp_channel, rc);
+					break;
+				}
+				temp = (int)result.physical;
+				if ((temp) > CHG_BATT_DETECTION_TEMP){
+					pr_debug("check batterydetectionstate removed fail:%d\n", i);
+					break;
+				}
+				pr_debug("check batterydetectionstate removed count %d\n", i);
+			}
+
+			if (i >= CHG_BATT_DETECTION_NUM){
+				is_batterydetected = false;
+				oem_charger_perform_battery_detection_state();
+				pr_debug("batterydetectionstate removed.\n");
+			}
+		}
+	}
+}
+
+#define HKADC_BATT_DEFAULT_TEMP		250
+static int oem_hkadc_init_battery_temp(void)
+{
+	int rc;
+	int work=0;
+	int cnt;
+	struct pm8xxx_adc_chan_result result;
+
+	if (!the_chip) {
+		pr_err("called before init\n");
+		return -EINVAL;
+	}
+	rc = pm8xxx_adc_read(the_chip->batt_temp_channel, &result);
+	if (rc) {
+		pr_err("error reading adc channel = %d, rc = %d\n",
+					the_chip->batt_temp_channel, rc);
+		work = HKADC_BATT_DEFAULT_TEMP;
+	}else{
+		work = (int)result.physical;
+	}
+	for (cnt=0;cnt<HKADC_BAT_TEMP_ELEMENT_COUNT;cnt++) {
+		bat_temp_work[cnt] = work;
+	}
+
+	oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_BAT_THERM] = work;
+
+	pr_debug("init hkadc battery temp = %d \n",
+		oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_BAT_THERM]);
+
+	oem_charger_init_batterydetectionstate(work);
+
+	return 0;
+}
+
+static int oem_hkadc_get_battery_temp(int *temp)
+{
+	int rc;
+	int work=0;
+	int max=0, min=0;
+	int total=0;
+	int cnt;
+	int average;
+	struct pm8xxx_adc_chan_result result;
+
+	if (!the_chip) {
+		pr_err("called before init\n");
+		return -EINVAL;
+	}
+	rc = pm8xxx_adc_read(the_chip->batt_temp_channel, &result);
+	if (rc) {
+		pr_err("error reading adc channel = %d, rc = %d\n",
+					the_chip->batt_temp_channel, rc);
+		rc = oem_hkadc_master_data_read(POWER_SUPPLY_PROP_TEMP, temp);
+		pr_debug("hkadc get battery temp do not updated. %d %d\n", rc, *temp);
+		return rc;
+	}
+	work = (int)result.physical;
+	for (cnt=0;cnt<HKADC_BAT_TEMP_ELEMENT_COUNT-1;cnt++) {
+		bat_temp_work[cnt] = bat_temp_work[cnt+1];
+		total = total + bat_temp_work[cnt];
+	}
+	bat_temp_work[cnt] = work;
+	total = total + bat_temp_work[cnt];
+
+	max = bat_temp_work[0];
+	min = bat_temp_work[0];
+	for (cnt=0;cnt<HKADC_BAT_TEMP_ELEMENT_COUNT;cnt++) {
+		if (max < bat_temp_work[cnt]) {
+			max = bat_temp_work[cnt];
+		} else if (min > bat_temp_work[cnt]) {
+			min = bat_temp_work[cnt];
+		}
+	}
+
+	average = (total - max - min) / (HKADC_BAT_TEMP_ELEMENT_COUNT-2);
+	oem_hkadc_master_data_write(POWER_SUPPLY_PROP_TEMP, average);
+	*temp = average;
+	pr_debug("hkadc battery temp total = %d max = %d min = %d \n", total, max, min);
+	pr_debug("hkadc battery temps = %d   %d %d %d %d %d \n", 
+		average,
+		bat_temp_work[0],
+		bat_temp_work[1],
+		bat_temp_work[2],
+		bat_temp_work[3],
+		bat_temp_work[4]);
+
+	return 0;
+}
+
+static int oem_hkadc_get_wakeup_battery_temp(int *temp)
+{
+	int rc;
+	int cnt;
+	int ngcnt;
+	int battemp_new=0;
+	int max=0, min=0;
+	int total=0;
+	int average;
+	int bat_temp_work_tmp[HKADC_BAT_TEMP_ELEMENT_COUNT];
+	struct pm8xxx_adc_chan_result result;
+
+	if (!the_chip) {
+		pr_err("called before init\n");
+		return -EINVAL;
+	}
+
+	ngcnt = 0;
+	for (cnt=0;cnt<HKADC_BAT_TEMP_ELEMENT_COUNT;cnt++) {
+		rc = pm8xxx_adc_read(the_chip->batt_temp_channel, &result);
+		if (rc) {
+			pr_err("error reading adc channel = %d, rc = %d\n",
+						the_chip->batt_temp_channel, rc);
+			ngcnt++;
+		}else{
+			battemp_new = (int)result.physical;
+			bat_temp_work_tmp[cnt] = (int)result.physical;
+		}
+	}
+	if (ngcnt == 0){
+		for (cnt=0;cnt<HKADC_BAT_TEMP_ELEMENT_COUNT;cnt++) {
+			bat_temp_work[cnt]=bat_temp_work_tmp[cnt];
+			total = total + bat_temp_work_tmp[cnt];
+		}
+		max = bat_temp_work[0];
+		min = bat_temp_work[0];
+		for (cnt=0;cnt<HKADC_BAT_TEMP_ELEMENT_COUNT;cnt++) {
+			if (max < bat_temp_work[cnt]) {
+				max = bat_temp_work[cnt];
+			} else if (min > bat_temp_work[cnt]) {
+				min = bat_temp_work[cnt];
+			}
+		}
+
+		average = (total - max - min) / (HKADC_BAT_TEMP_ELEMENT_COUNT-2);
+		oem_hkadc_master_data_write(POWER_SUPPLY_PROP_TEMP, average);
+		*temp = average;
+		pr_debug("hkadc wakeup battery temp total = %d max = %d min = %d \n", total, max, min);
+		pr_debug("hkadc wakeup battery temp = %d   %d %d %d %d %d \n", 
+			average,
+			bat_temp_work[0],
+			bat_temp_work[1],
+			bat_temp_work[2],
+			bat_temp_work[3],
+			bat_temp_work[4]);
+	}else if (ngcnt < HKADC_BAT_TEMP_ELEMENT_COUNT){
+		for (cnt=0;cnt<HKADC_BAT_TEMP_ELEMENT_COUNT;cnt++) {
+			bat_temp_work[cnt] = battemp_new;
+		}
+		oem_hkadc_master_data_write(POWER_SUPPLY_PROP_TEMP, battemp_new);
+		*temp = battemp_new;
+		pr_debug("hkadc wakeup battery temp battemp_new = %d\n", battemp_new);
+	}else{
+		rc = oem_hkadc_master_data_read(POWER_SUPPLY_PROP_TEMP, temp);
+		pr_debug("hkadc wakeup battery temp do not updated. %d %d\n", rc, *temp);
+	}
+
+	return 0;
+}
+
+static int oem_hkadc_init_battery_current(void)
+{
+	int work=0;
+	int cnt;
+	int rc;
+	struct pm8xxx_adc_chan_result result;
+	if (!the_chip) {
+		pr_err("called before init\n");
+		return -EINVAL;
+	}
+	rc = pm8xxx_adc_read(CHANNEL_IBAT, &result);
+	if (rc) {
+		pr_debug("error reading adc channel = %d, rc = %d\n",
+				CHANNEL_IBAT, rc);
+		return rc;
+	}
+	work = (int)result.physical;
+	for (cnt=0;cnt<HKADC_IBAT_CURRENT_ELEMENT_COUNT;cnt++) {
+		ibat_work[cnt] = work;
+	}
+
+	oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_BAT_CURRENT] = work;
+
+	pr_debug("init hkadc battery current = %d \n",
+		oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_BAT_CURRENT]);
+
+	return 0;
+}
+
+static int oem_hkadc_get_battery_current(int* ibat_uv)
+{
+	int work=0;
+	int max=0, min=0;
+	int total=0;
+	int cnt;
+	int average;
+	int rc;
+	struct pm8xxx_adc_chan_result result;
+	if (!the_chip) {
+		pr_err("called before init\n");
+		return -EINVAL;
+	}
+	rc = pm8xxx_adc_read(CHANNEL_IBAT, &result);
+	if (rc) {
+		pr_debug("error reading adc channel = %d, rc = %d\n",
+				CHANNEL_IBAT, rc);
+		return rc;
+	}
+	work = (int)result.physical;
+	for (cnt=0;cnt<HKADC_IBAT_CURRENT_ELEMENT_COUNT-1;cnt++) {
+		ibat_work[cnt] = ibat_work[cnt+1];
+		total = total + ibat_work[cnt];
+	}
+	ibat_work[cnt] = work;
+	total = total + ibat_work[cnt];
+
+	max = ibat_work[0];
+	min = ibat_work[0];
+	for (cnt=0;cnt<HKADC_IBAT_CURRENT_ELEMENT_COUNT;cnt++) {
+		if (max < ibat_work[cnt]) {
+			max = ibat_work[cnt];
+		} else if (min > ibat_work[cnt]) {
+			min = ibat_work[cnt];
+		}
+	}
+
+	average = (total - max - min) / (HKADC_IBAT_CURRENT_ELEMENT_COUNT-2);
+	oem_hkadc_master_data_write(POWER_SUPPLY_PROP_CURRENT_NOW, average);
+	*ibat_uv = average;
+	pr_debug("hkadc battery current total = %d max = %d min = %d \n", total, max, min);
+	pr_debug("hkadc battery current = %d   %d %d %d %d %d \n", 
+		average,
+		ibat_work[0],
+		ibat_work[1],
+		ibat_work[2],
+		ibat_work[3],
+		ibat_work[4]);
+
+	return 0;
+}
+
+static int oem_hkadc_init_pa_therm(void)
+{
+	int rc;
+	int work=0;
+	int cnt;
+
+	struct pm8xxx_adc_chan_result result;
+
+	rc = pm8xxx_adc_read(ADC_MPP_1_AMUX3, &result);
+	if (rc) {
+		pr_debug("error reading adc channel = %d, rc = %d\n",
+				ADC_MPP_1_AMUX3, rc);
+		return rc;
+	}
+	work = (int)result.physical;
+
+	for (cnt=0;cnt<HKADC_PA_THERM_ELEMENT_COUNT;cnt++) {
+		pa_therm_work[cnt] = work;
+	}
+
+	oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_PA_THERM] = work;
+
+	pr_debug("init hkadc pa therm = %d \n",
+		oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_PA_THERM]);
+
+	return 0;
+}
+
+static int oem_hkadc_get_pa_therm(void)
+{
+	int rc;
+	int work=0;
+	int max=0, min=0;
+	int total=0;
+	int cnt;
+	int average;
+
+	struct pm8xxx_adc_chan_result result;
+
+	rc = pm8xxx_adc_read(ADC_MPP_1_AMUX3, &result);
+	if (rc) {
+		pr_debug("error reading adc channel = %d, rc = %d\n",
+				ADC_MPP_1_AMUX3, rc);
+		return rc;
+	}
+	work = (int)result.physical;
+	for (cnt=0;cnt<HKADC_PA_THERM_ELEMENT_COUNT-1;cnt++) {
+		pa_therm_work[cnt] = pa_therm_work[cnt+1];
+		total = total + pa_therm_work[cnt];
+	}
+	pa_therm_work[cnt] = (int)result.physical;
+	total = total + pa_therm_work[cnt];
+
+	max = pa_therm_work[0];
+	min = pa_therm_work[0];
+	for (cnt=0;cnt<HKADC_PA_THERM_ELEMENT_COUNT;cnt++) {
+		if (max < pa_therm_work[cnt]) {
+			max = pa_therm_work[cnt];
+		} else if (min > pa_therm_work[cnt]) {
+			min = pa_therm_work[cnt];
+		}
+	}
+
+	average = (total - max - min) / (HKADC_PA_THERM_ELEMENT_COUNT-2);
+	oem_hkadc_master_data_write(POWER_SUPPLY_PROP_OEM_PA_THERM, average);
+
+	pr_debug("hkadc pa_therm total = %d max = %d min = %d \n", total, max, min);
+	pr_debug("hkadc pa_therm = %d   %d %d %d %d %d \n", 
+		average,
+		pa_therm_work[0],
+		pa_therm_work[1],
+		pa_therm_work[2],
+		pa_therm_work[3],
+		pa_therm_work[4]);
+
+	return 0;
+}
+
+static int oem_hkadc_get_wakeup_pa_therm(void)
+{
+	int rc;
+	int cnt;
+	int ngcnt;
+	int pa_therm_new=0;
+	int max=0, min=0;
+	int total=0;
+	int average;
+	int pa_therm_work_tmp[HKADC_PA_THERM_ELEMENT_COUNT];
+	struct pm8xxx_adc_chan_result result;
+
+	ngcnt = 0;
+	for (cnt=0;cnt<HKADC_PA_THERM_ELEMENT_COUNT;cnt++) {
+		rc = pm8xxx_adc_read(ADC_MPP_1_AMUX3, &result);
+		if (rc) {
+			pr_err("error reading adc channel = %d, rc = %d\n",
+					ADC_MPP_1_AMUX3, rc);
+			ngcnt++;
+		}else{
+			pa_therm_new = (int)result.physical;
+			pa_therm_work_tmp[cnt] = (int)result.physical;
+		}
+	}
+	if (ngcnt == 0){
+		for (cnt=0;cnt<HKADC_PA_THERM_ELEMENT_COUNT;cnt++) {
+			pa_therm_work[cnt]=pa_therm_work_tmp[cnt];
+			total = total + pa_therm_work_tmp[cnt];
+		}
+		max = pa_therm_work[0];
+		min = pa_therm_work[0];
+		for (cnt=0;cnt<HKADC_PA_THERM_ELEMENT_COUNT;cnt++) {
+			if (max < pa_therm_work[cnt]) {
+				max = pa_therm_work[cnt];
+			} else if (min > pa_therm_work[cnt]) {
+				min = pa_therm_work[cnt];
+			}
+		}
+
+		average = (total - max - min) / (HKADC_PA_THERM_ELEMENT_COUNT-2);
+		oem_hkadc_master_data_write(POWER_SUPPLY_PROP_OEM_PA_THERM, average);
+		pr_debug("hkadc wakeup pa_therm total = %d max = %d min = %d \n", total, max, min);
+		pr_debug("hkadc wakeup pa_therm = %d   %d %d %d %d %d \n", 
+			average,
+			pa_therm_work[0],
+			pa_therm_work[1],
+			pa_therm_work[2],
+			pa_therm_work[3],
+			pa_therm_work[4]);
+	}else if (ngcnt < HKADC_PA_THERM_ELEMENT_COUNT){
+		for (cnt=0;cnt<HKADC_PA_THERM_ELEMENT_COUNT;cnt++) {
+			pa_therm_work[cnt] = pa_therm_new;
+		}
+		oem_hkadc_master_data_write(POWER_SUPPLY_PROP_OEM_PA_THERM, pa_therm_new);
+		pr_debug("hkadc wakeup pa_therm_new = %d\n", pa_therm_new);
+	}else{
+		pr_debug("hkadc wakeup pa_therm do not updated.\n");
+	}
+
+	return 0;
+}
+
+static int oem_hkadc_init_camera_therm(void)
+{
+	int rc;
+	int work=0;
+	int cnt;
+
+	struct pm8xxx_adc_chan_result result;
+
+	rc = pm8xxx_adc_read(ADC_MPP_1_AMUX7, &result);
+	if (rc) {
+		pr_debug("error reading adc channel = %d, rc = %d\n",
+				ADC_MPP_1_AMUX7, rc);
+		return rc;
+	}
+	work = (int)result.physical;
+
+	for (cnt=0;cnt<HKADC_CAMERA_TEMP_ELEMENT_COUNT;cnt++) {
+		camera_therm_work[cnt] = work;
+	}
+
+	oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_CAMERA_THERM] = work;
+
+	pr_debug("init hkadc camera therm = %d \n",
+		oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_CAMERA_THERM]);
+
+	return 0;
+}
+
+static int oem_hkadc_get_camera_therm(int *therm)
+{
+	int rc;
+	int work=0;
+	int max=0, min=0;
+	int total=0;
+	int cnt;
+	int average;
+
+	struct pm8xxx_adc_chan_result result;
+
+	rc = pm8xxx_adc_read(ADC_MPP_1_AMUX7, &result);
+	if (rc) {
+		pr_debug("error reading adc channel = %d, rc = %d\n",
+				ADC_MPP_1_AMUX7, rc);
+		rc = oem_hkadc_master_data_read(POWER_SUPPLY_PROP_OEM_CAMERA_THERM, therm);
+		pr_debug("hkadc get camera_therm do not updated. %d %d\n", rc, *therm);
+		return rc;
+	}
+	work = (int)result.physical;
+	for (cnt=0;cnt<HKADC_CAMERA_TEMP_ELEMENT_COUNT-1;cnt++) {
+		camera_therm_work[cnt] = camera_therm_work[cnt+1];
+		total = total + camera_therm_work[cnt];
+	}
+	camera_therm_work[cnt] = work;
+	total = total + camera_therm_work[cnt];
+
+	max = camera_therm_work[0];
+	min = camera_therm_work[0];
+	for (cnt=0;cnt<HKADC_CAMERA_TEMP_ELEMENT_COUNT;cnt++) {
+		if (max < camera_therm_work[cnt]) {
+			max = camera_therm_work[cnt];
+		} else if (min > camera_therm_work[cnt]) {
+			min = camera_therm_work[cnt];
+		}
+	}
+
+	average = (total - max - min) / (HKADC_CAMERA_TEMP_ELEMENT_COUNT-2);
+	oem_hkadc_master_data_write(POWER_SUPPLY_PROP_OEM_CAMERA_THERM, average);
+	*therm = average;
+	pr_debug("hkadc camera therm total = %d max = %d min = %d \n", total, max, min);
+	pr_debug("hkadc camera therm = %d   %d %d %d %d %d \n", 
+		average, camera_therm_work[0],
+		camera_therm_work[1],
+		camera_therm_work[2],
+		camera_therm_work[3],
+		camera_therm_work[4]);
+
+	return 0;
+}
+
+static int oem_hkadc_get_wakeup_camera_therm(int *therm)
+{
+	int rc;
+	int cnt;
+	int ngcnt;
+	int camera_therm_new=0;
+	int max=0, min=0;
+	int total=0;
+	int average;
+	int camera_therm_work_tmp[HKADC_CAMERA_TEMP_ELEMENT_COUNT];
+	struct pm8xxx_adc_chan_result result;
+
+	ngcnt = 0;
+	for (cnt=0;cnt<HKADC_CAMERA_TEMP_ELEMENT_COUNT;cnt++) {
+		rc = pm8xxx_adc_read(ADC_MPP_1_AMUX7, &result);
+		if (rc) {
+			pr_err("error reading adc channel = %d, rc = %d\n",
+					ADC_MPP_1_AMUX7, rc);
+			ngcnt++;
+		}else{
+			camera_therm_new = (int)result.physical;
+			camera_therm_work_tmp[cnt] = (int)result.physical;
+		}
+	}
+	if (ngcnt == 0){
+		for (cnt=0;cnt<HKADC_CAMERA_TEMP_ELEMENT_COUNT;cnt++) {
+			camera_therm_work[cnt]=camera_therm_work_tmp[cnt];
+			total = total + camera_therm_work_tmp[cnt];
+		}
+		max = camera_therm_work[0];
+		min = camera_therm_work[0];
+		for (cnt=0;cnt<HKADC_CAMERA_TEMP_ELEMENT_COUNT;cnt++) {
+			if (max < camera_therm_work[cnt]) {
+				max = camera_therm_work[cnt];
+			} else if (min > camera_therm_work[cnt]) {
+				min = camera_therm_work[cnt];
+			}
+		}
+
+		average = (total - max - min) / (HKADC_CAMERA_TEMP_ELEMENT_COUNT-2);
+		oem_hkadc_master_data_write(POWER_SUPPLY_PROP_OEM_CAMERA_THERM, average);
+		*therm = average;
+		pr_debug("hkadc wakeup camera_therm total = %d max = %d min = %d \n", total, max, min);
+		pr_debug("hkadc wakeup camera_therm = %d   %d %d %d %d %d \n", 
+			average,
+			camera_therm_work[0],
+			camera_therm_work[1],
+			camera_therm_work[2],
+			camera_therm_work[3],
+			camera_therm_work[4]);
+	}else if (ngcnt < HKADC_CAMERA_TEMP_ELEMENT_COUNT){
+		for (cnt=0;cnt<HKADC_CAMERA_TEMP_ELEMENT_COUNT;cnt++) {
+			camera_therm_work[cnt] = camera_therm_new;
+		}
+		oem_hkadc_master_data_write(POWER_SUPPLY_PROP_OEM_CAMERA_THERM, camera_therm_new);
+		*therm = camera_therm_new;
+		pr_debug("hkadc wakeup camera_therm_new = %d\n", camera_therm_new);
+	}else{
+		rc = oem_hkadc_master_data_read(POWER_SUPPLY_PROP_OEM_CAMERA_THERM, therm);
+		pr_debug("hkadc wakeup camera_therm do not updated. %d %d\n", rc, *therm);
+	}
+
+	return 0;
+}
+
+static int oem_hkadc_init_substrate_therm(void)
+{
+	int rc;
+	int work=0;
+	int cnt;
+
+	struct pm8xxx_adc_chan_result result;
+
+	rc = pm8xxx_adc_read(ADC_MPP_1_AMUX4, &result);
+	if (rc) {
+		pr_debug("error reading adc channel = %d, rc = %d\n",
+				ADC_MPP_1_AMUX4, rc);
+		return rc;
+	}
+	work = (int)result.physical;
+
+	for (cnt=0;cnt<HKADC_SUBSTRATE_THERM_ELEMENT_COUNT;cnt++) {
+		substrate_therm_work[cnt] = work;
+	}
+
+	oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_SUBSTRATE_THERM] = work;
+
+	pr_debug("init hkadc substrate therm = %d \n",
+		oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_SUBSTRATE_THERM]);
+
+	return 0;
+}
+
+static int oem_hkadc_get_substrate_therm(int *therm)
+{
+	int rc;
+	int work=0;
+	int max=0, min=0;
+	int total=0;
+	int cnt;
+	int average;
+
+	struct pm8xxx_adc_chan_result result;
+
+	rc = pm8xxx_adc_read(ADC_MPP_1_AMUX4, &result);
+	if (rc) {
+		pr_debug("error reading adc channel = %d, rc = %d\n",
+				ADC_MPP_1_AMUX4, rc);
+		rc = oem_hkadc_master_data_read(POWER_SUPPLY_PROP_OEM_SUBSTRATE_THERM, therm);
+		pr_debug("hkadc get substrate_therm do not updated. %d %d\n", rc, *therm);
+		return rc;
+	}
+	work = (int)result.physical;
+
+	for (cnt=0;cnt<HKADC_SUBSTRATE_THERM_ELEMENT_COUNT-1;cnt++) {
+		substrate_therm_work[cnt] = substrate_therm_work[cnt+1];
+		total = total + substrate_therm_work[cnt];
+	}
+	substrate_therm_work[cnt] = work;
+	total = total + substrate_therm_work[cnt];
+
+	max = substrate_therm_work[0];
+	min = substrate_therm_work[0];
+	for (cnt=0;cnt<HKADC_SUBSTRATE_THERM_ELEMENT_COUNT;cnt++) {
+		if (max < substrate_therm_work[cnt]) {
+			max = substrate_therm_work[cnt];
+		} else if (min > substrate_therm_work[cnt]) {
+			min = substrate_therm_work[cnt];
+		}
+	}
+
+	average = (total - max - min) / (HKADC_SUBSTRATE_THERM_ELEMENT_COUNT-2);
+	oem_hkadc_master_data_write(POWER_SUPPLY_PROP_OEM_SUBSTRATE_THERM, average);
+	*therm = average;
+	pr_debug("hkadc substrate therm total = %d max = %d min = %d \n", total, max, min);
+	pr_debug("hkadc substrate therm = %d   %d %d %d %d %d \n", 
+		average,
+		substrate_therm_work[0],
+		substrate_therm_work[1],
+		substrate_therm_work[2],
+		substrate_therm_work[3],
+		substrate_therm_work[4]);
+
+	return 0;
+}
+
+static int oem_hkadc_get_wakeup_substrate_therm(int *therm)
+{
+	int rc;
+	int cnt;
+	int ngcnt;
+	int substrate_therm_new=0;
+	int max=0, min=0;
+	int total=0;
+	int average;
+	int substrate_therm_work_tmp[HKADC_SUBSTRATE_THERM_ELEMENT_COUNT];
+	struct pm8xxx_adc_chan_result result;
+
+	ngcnt = 0;
+	for (cnt=0;cnt<HKADC_SUBSTRATE_THERM_ELEMENT_COUNT;cnt++) {
+		rc = pm8xxx_adc_read(ADC_MPP_1_AMUX4, &result);
+		if (rc) {
+			pr_err("error reading adc channel = %d, rc = %d\n",
+					ADC_MPP_1_AMUX4, rc);
+			ngcnt++;
+		}else{
+			substrate_therm_new = (int)result.physical;
+			substrate_therm_work_tmp[cnt] = (int)result.physical;
+		}
+	}
+	if (ngcnt == 0){
+		for (cnt=0;cnt<HKADC_SUBSTRATE_THERM_ELEMENT_COUNT;cnt++) {
+			substrate_therm_work[cnt]=substrate_therm_work_tmp[cnt];
+			total = total + substrate_therm_work_tmp[cnt];
+		}
+		max = substrate_therm_work[0];
+		min = substrate_therm_work[0];
+		for (cnt=0;cnt<HKADC_SUBSTRATE_THERM_ELEMENT_COUNT;cnt++) {
+			if (max < substrate_therm_work[cnt]) {
+				max = substrate_therm_work[cnt];
+			} else if (min > substrate_therm_work[cnt]) {
+				min = substrate_therm_work[cnt];
+			}
+		}
+
+		average = (total - max - min) / (HKADC_SUBSTRATE_THERM_ELEMENT_COUNT-2);
+		oem_hkadc_master_data_write(POWER_SUPPLY_PROP_OEM_SUBSTRATE_THERM, average);
+		*therm = average;
+		pr_debug("hkadc wakeup substrate_therm total = %d max = %d min = %d \n", total, max, min);
+		pr_debug("hkadc wakeup substrate_therm = %d   %d %d %d %d %d \n", 
+			average,
+			substrate_therm_work[0],
+			substrate_therm_work[1],
+			substrate_therm_work[2],
+			substrate_therm_work[3],
+			substrate_therm_work[4]);
+	}else if (ngcnt < HKADC_SUBSTRATE_THERM_ELEMENT_COUNT){
+		for (cnt=0;cnt<HKADC_SUBSTRATE_THERM_ELEMENT_COUNT;cnt++) {
+			substrate_therm_work[cnt] = substrate_therm_new;
+		}
+		oem_hkadc_master_data_write(POWER_SUPPLY_PROP_OEM_SUBSTRATE_THERM, substrate_therm_new);
+		*therm = substrate_therm_new;
+		pr_debug("hkadc wakeup substrate_therm_new = %d\n", substrate_therm_new);
+	}else{
+		rc = oem_hkadc_master_data_read(POWER_SUPPLY_PROP_OEM_SUBSTRATE_THERM, therm);
+		pr_debug("hkadc wakeup substrate_therm do not updated. %d %d\n", rc, *therm);
+	}
+
+	return 0;
+}
+
+static int oem_hkadc_init_usb_therm(void)
+{
+	int rc;
+	int work=0;
+	int cnt;
+
+	struct pm8xxx_adc_chan_result result;
+
+	rc = pm8xxx_adc_read(ADC_MPP_1_AMUX8, &result);
+	if (rc) {
+		pr_debug("error reading adc channel = %d, rc = %d\n",
+				ADC_MPP_1_AMUX8, rc);
+		return rc;
+	}
+	work = (int)result.physical;
+
+	for (cnt=0;cnt<HKADC_USB_THERM_ELEMENT_COUNT;cnt++) {
+		usb_therm_work[cnt] = work;
+	}
+
+	oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_USB_THERM] = work;
+
+	pr_debug("init hkadc usb therm = %d \n",
+		oem_hkadc_master_data[OEM_POWER_SUPPLY_PROP_IDX_USB_THERM]);
+
+	return 0;
+}
+
+static int oem_hkadc_get_usb_therm(int *therm)
+{
+	int rc;
+	int work=0;
+	int max=0, min=0;
+	int total=0;
+	int cnt;
+	int average;
+
+	struct pm8xxx_adc_chan_result result;
+
+	rc = pm8xxx_adc_read(ADC_MPP_1_AMUX8, &result);
+	if (rc) {
+		pr_debug("error reading adc channel = %d, rc = %d\n",
+				ADC_MPP_1_AMUX8, rc);
+		rc = oem_hkadc_master_data_read(POWER_SUPPLY_PROP_OEM_USB_THERM, therm);
+		pr_debug("hkadc get usb_therm do not updated. %d %d\n", rc, *therm);
+		return rc;
+	}
+	work = (int)result.physical;
+
+	for (cnt=0;cnt<HKADC_USB_THERM_ELEMENT_COUNT-1;cnt++) {
+		usb_therm_work[cnt] = usb_therm_work[cnt+1];
+		total = total + usb_therm_work[cnt];
+	}
+	usb_therm_work[cnt] = work;
+	total = total + usb_therm_work[cnt];
+
+	max = usb_therm_work[0];
+	min = usb_therm_work[0];
+	for (cnt=0;cnt<HKADC_USB_THERM_ELEMENT_COUNT;cnt++) {
+		if (max < usb_therm_work[cnt]) {
+			max = usb_therm_work[cnt];
+		} else if (min > usb_therm_work[cnt]) {
+			min = usb_therm_work[cnt];
+		}
+	}
+
+	average = (total - max - min) / (HKADC_USB_THERM_ELEMENT_COUNT-2);
+	oem_hkadc_master_data_write(POWER_SUPPLY_PROP_OEM_USB_THERM, average);
+	*therm = average;
+	pr_debug("hkadc usb therm total = %d max = %d min = %d \n", total, max, min);
+	pr_debug("hkadc usb therm = %d   %d %d %d %d %d \n", 
+		average,
+		usb_therm_work[0],
+		usb_therm_work[1],
+		usb_therm_work[2],
+		usb_therm_work[3],
+		usb_therm_work[4]);
+
+	return 0;
+}
+
+static int oem_hkadc_get_wakeup_usb_therm(int *therm)
+{
+	int rc;
+	int cnt;
+	int ngcnt;
+	int usb_therm_new=0;
+	int max=0, min=0;
+	int total=0;
+	int average;
+	int usb_therm_work_tmp[HKADC_USB_THERM_ELEMENT_COUNT];
+	struct pm8xxx_adc_chan_result result;
+
+	ngcnt = 0;
+	for (cnt=0;cnt<HKADC_USB_THERM_ELEMENT_COUNT;cnt++) {
+		rc = pm8xxx_adc_read(ADC_MPP_1_AMUX8, &result);
+		if (rc) {
+			pr_err("error reading adc channel = %d, rc = %d\n",
+					ADC_MPP_1_AMUX8, rc);
+			ngcnt++;
+		}else{
+			usb_therm_new = (int)result.physical;
+			usb_therm_work_tmp[cnt] = (int)result.physical;
+		}
+	}
+	if (ngcnt == 0){
+		for (cnt=0;cnt<HKADC_USB_THERM_ELEMENT_COUNT;cnt++) {
+			usb_therm_work[cnt]=usb_therm_work_tmp[cnt];
+			total = total + usb_therm_work_tmp[cnt];
+		}
+		max = usb_therm_work[0];
+		min = usb_therm_work[0];
+		for (cnt=0;cnt<HKADC_USB_THERM_ELEMENT_COUNT;cnt++) {
+			if (max < usb_therm_work[cnt]) {
+				max = usb_therm_work[cnt];
+			} else if (min > usb_therm_work[cnt]) {
+				min = usb_therm_work[cnt];
+			}
+		}
+
+		average = (total - max - min) / (HKADC_USB_THERM_ELEMENT_COUNT-2);
+		oem_hkadc_master_data_write(POWER_SUPPLY_PROP_OEM_USB_THERM, average);
+		*therm = average;
+		pr_debug("hkadc wakeup usb_therm total = %d max = %d min = %d \n", total, max, min);
+		pr_debug("hkadc wakeup usb_therm = %d   %d %d %d %d %d \n", 
+			average,
+			usb_therm_work[0],
+			usb_therm_work[1],
+			usb_therm_work[2],
+			usb_therm_work[3],
+			usb_therm_work[4]);
+	}else if (ngcnt < HKADC_USB_THERM_ELEMENT_COUNT){
+		for (cnt=0;cnt<HKADC_USB_THERM_ELEMENT_COUNT;cnt++) {
+			usb_therm_work[cnt] = usb_therm_new;
+		}
+		oem_hkadc_master_data_write(POWER_SUPPLY_PROP_OEM_USB_THERM, usb_therm_new);
+		*therm = usb_therm_new;
+		pr_debug("hkadc wakeup usb_therm_new = %d\n", usb_therm_new);
+	}else{
+		rc = oem_hkadc_master_data_read(POWER_SUPPLY_PROP_OEM_USB_THERM, therm);
+		pr_debug("hkadc wakeup usb_therm do not updated. %d %d\n", rc, *therm);
+	}
+
+	return 0;
+}
+
+static int oem_hkadc_pm_batt_power_get_property(enum power_supply_property psp, int *intval)
+{
+	int ret = 0;
+
+	switch (psp) {
+	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+	case POWER_SUPPLY_PROP_OEM_PA_THERM:
+	case POWER_SUPPLY_PROP_OEM_CAMERA_THERM:
+	case POWER_SUPPLY_PROP_OEM_SUBSTRATE_THERM:
+	case POWER_SUPPLY_PROP_OEM_USB_THERM:
+		ret = oem_hkadc_master_data_read(psp, intval);
+		break;
+
+	case POWER_SUPPLY_PROP_TEMP:
+		if ((POWER_SUPPLY_PROP_TEMP == psp) &&
+		    (oem_param_share.factory_mode_1)) {
+			*intval = 250;
+			ret = 0;
+		}else {
+			ret = oem_hkadc_master_data_read(psp, intval);
+		}
+		break;
+
+	default:
+		ret = -EINVAL;
+	}
+	return ret;
+}
+
+static int oem_charger_determine_connect_state(void)
+{
+	if (!the_chip) {
+		pr_err("called before init\n");
+		return -EINVAL;
+	}
+
+	if (oem_stand_detect){
+		pr_debug("charger connect %d \n", oem_charge_stand_flag);
+		if (oem_charge_stand_flag){
+			return POWER_SUPPLY_OEM_CONNECT_CHARGE_STAND_1;
+		}else{
+			return POWER_SUPPLY_OEM_CONNECT_CHARGE_STAND_2;
+		}
+		
+	}else{
+		pr_debug("charger disconnect %d \n", the_chip->usb_present);
+		if (the_chip->usb_present){
+			return POWER_SUPPLY_OEM_CONNECT_USB;
+		}else{
+			return POWER_SUPPLY_OEM_CONNECT_NONE;
+		}
+	}
+}
+
+static int oem_charger_init_connect_state(void)
+{
+	int state;
+
+	state = oem_charger_determine_connect_state();
+	pr_debug("init charger connect state = %d \n", state);
+
+	if (-1 < state) {
+		oem_charger_connect_state = state;
+	} else {
+		return state;
+	}
+
+	return 0;
+}
+
+static int oem_charger_get_connect_state(void)
+{
+	int state;
+
+	state = oem_charger_determine_connect_state();
+	pr_debug("charger connect state = %d \n", state);
+
+	if (-1 < state) {
+		oem_charger_master_data_write(POWER_SUPPLY_PROP_OEM_CHARGE_CONNECT_STATE, state);
+	} else {
+		return state;
+	}
+
+	return 0;
+}
+
+static uint32_t oem_charge_fail_status = 0;
+static void oem_judge_charge_state(void)
+{
+	do {
+		if (!the_chip->dc_present && !the_chip->usb_present && !oem_stand_detect) {
+			charge_state = CHG_STATE_NONCONNECTED;
+			break;
+		}
+
+		if (oem_charge_stand_flag) {
+			charge_state = CHG_STATE_CHG_STAND;
+			break;
+		}
+
+		if (is_oem_fast_chg_expired) {
+			charge_state = CHG_STATE_CHG_TIMEOUT;
+			break;
+		}
+
+		if (pm_chg_get_rt_status(the_chip, TRKLCHG_IRQ)) {
+			charge_state = CHG_STATE_TRICKLE;
+			break;
+		}
+
+		if (POWER_SUPPLY_STATUS_FULL == get_prop_batt_status(the_chip)) {
+			charge_state = CHG_STATE_CHG_COMP;
+			break;
+		}
+
+		if (OEM_STATUS_LIMIT == oem_charge_status) {
+			if (the_chip->is_bat_warm) {
+				charge_state = CHG_STATE_INTE_WARM;
+			} else if (the_chip->is_bat_cool) {
+				charge_state = CHG_STATE_INTE_COOL;
+			} else {
+				charge_state = CHG_STATE_INTE_NORMAL;
+			}
+			break;
+		}
+
+		if ((pm_chg_get_rt_status(the_chip, FASTCHG_IRQ)) ||
+		    (oem_pm8921_bms_is_cyclecorrection_chargeoffstate())
+		   ) {
+			if (the_chip->is_bat_warm) {
+				charge_state = CHG_STATE_FAST_WARM;
+			} else if (the_chip->is_bat_cool) {
+				charge_state = CHG_STATE_FAST_COOL;
+			} else {
+				charge_state = CHG_STATE_FAST_NORMAL;
+			}
+			break;
+		}
+
+		if (oem_batt_health == POWER_SUPPLY_HEALTH_COLD) {
+			charge_state = CHG_STATE_BATT_TEMP_COLD;
+			break;
+		}
+
+		if (oem_batt_health == POWER_SUPPLY_HEALTH_OVERHEAT) {
+			charge_state = CHG_STATE_BATT_TEMP_HOT;
+			break;
+		}
+
+		if (OEM_STATUS_STOP == oem_charge_status) {
+			charge_state = CHG_STATE_WAIT_TEMP;
+			break;
+		}
+
+		if (pm_chg_get_rt_status(the_chip, BATT_REMOVED_IRQ)) {
+			charge_state = CHG_STATE_BATT_ID_ERROR;
+			break;
+		}
+
+		if (oem_charge_fail_status) {
+			charge_state = CHG_STATE_CHG_ERROR;
+			break;
+		}
+
+		charge_state = CHG_STATE_IDLE;
+
+	} while(0);
+	pr_debug("charge state = %d\n", charge_state);
+	return;
+}
+
+static void oem_chg_check_charger_removal_after_timer_expired(void)
+{
+	int ret;
+	if (is_oem_fast_chg_expired == true){
+		if (!the_chip->dc_present && !the_chip->usb_present && !oem_stand_detect) {
+			is_oem_fast_chg_expired = false;
+			pr_debug("oem_chg_check_charger_removal_after_timer_expired()\n");
+			ret = oem_pm8921_disable_source_current(false);
+			if (ret) {
+				pr_err("error buck converter setting value %d\n", ret);
+			}
+			ret = pm_chg_auto_enable(the_chip, true);
+			if (ret) {
+				pr_err("error bat_fet setting value %d\n", ret);
+			}
+		}
+	}
+}
+
+static void oem_chg_recharge_check_after_timer_expired(void)
+{
+	int ret;
+	if (is_oem_fast_chg_expired == true){
+		if (oem_vbatt <= ((the_chip->max_voltage_mv - the_chip->resume_voltage_delta)*1000)){
+			is_oem_fast_chg_expired = false;
+			pr_debug("oem_chg_recharge_check_after_timer_expired()\n");
+			ret = oem_pm8921_disable_source_current(false);
+			if (ret) {
+				pr_err("error buck converter setting value %d\n", ret);
+			}
+			ret = pm_chg_auto_enable(the_chip, true);
+			if (ret) {
+				pr_err("error bat_fet setting value %d\n", ret);
+			}
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+			oem_chg_stand_off();
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+			schedule_work(&fast_chg_count_start_work);
+		}
+	}
+}
+
+static void oem_chg_vbat_ov_check_after_timer_expired(void)
+{
+	int ret;
+	if (is_oem_fast_chg_expired == true){
+		if ((oem_param_charger.chg_stop_volt * 1000) <= oem_vbatt){
+			is_oem_fast_chg_expired = false;
+			pr_debug("oem_chg_vbat_ov_check_after_timer_expired()\n");
+			ret = oem_pm8921_disable_source_current(true);
+			if (ret) {
+				pr_err("error buck converter setting value %d\n", ret);
+			}
+			ret = pm_chg_auto_enable(the_chip, true);
+			if (ret) {
+				pr_err("error bat_fet setting value %d\n", ret);
+			}
+		}
+	}
+}
+
+static void oem_chg_check_battery_detection_after_timer_expired(void)
+{
+	int ret;
+	if (is_oem_fast_chg_expired == true){
+		if (oem_option_item1_bit0){
+			if (!is_batterydetected){
+				is_oem_fast_chg_expired = false;
+				pr_debug("oem_chg_check_battery_detection_after_timer_expired()\n");
+				ret = oem_pm8921_disable_source_current(false);
+				if (ret) {
+					pr_err("error buck converter setting value %d\n", ret);
+				}
+				ret = pm_chg_auto_enable(the_chip, false);
+				if (ret) {
+					pr_err("error bat_fet setting value %d\n", ret);
+				}
+			}
+		}
+	}
+}
+
+static void oem_chg_check_adapter_overvoltage_after_timer_expired(void)
+{
+	int ret;
+	if (is_oem_fast_chg_expired == true){
+		if (pm_chg_get_rt_status(the_chip, DCIN_OV_IRQ)){
+			is_oem_fast_chg_expired = false;
+			pr_debug("oem_chg_check_adapter_overvoltage_after_timer_expired()\n");
+			ret = oem_pm8921_disable_source_current(false);
+			if (ret) {
+				pr_err("error buck converter setting value %d\n", ret);
+			}
+			ret = pm_chg_auto_enable(the_chip, true);
+			if (ret) {
+				pr_err("error bat_fet setting value %d\n", ret);
+			}
+		}
+	}
+}
+
+static void oem_chg_check_vbatt_ov(void){
+
+	pr_debug("oem_chg_check_vbatt_ov. %d %d\n", oem_vbatt, is_batterydetected);
+
+	if (((oem_param_charger.chg_stop_volt * 1000) <= oem_vbatt) || (!is_batterydetected)){
+		pr_debug("chg_vbatt_ov_worker performed.\n");
+		schedule_work(&chg_vbatt_ov_work);
+	}
+}
+
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+static void oem_stand_check(void);
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+extern void oem_pm8921_bms_calculate_cyclecorrection(void);
+
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+static void oem_chg_stand_check_control(void);
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+static void oem_hkadc_monitor(struct work_struct *work)
+{
+	int vbat  = 0;
+	int temp  = 0;
+	int ibat  = 0;
+	int camera_therm  = 0;
+	int substrate_therm = 0;
+	int usb_therm = 0;
+	int rc = 0;
+
+	oem_hkadc_get_battery_current(&ibat);
+
+	if (is_hkadc_suspend_monit){
+		oem_hkadc_get_wakeup_battery_uvolts(&vbat);
+		oem_hkadc_get_wakeup_battery_temp(&temp);
+		oem_hkadc_get_wakeup_pa_therm();
+		oem_hkadc_get_wakeup_camera_therm(&camera_therm);
+		oem_hkadc_get_wakeup_substrate_therm(&substrate_therm);
+		oem_hkadc_get_wakeup_usb_therm(&usb_therm);
+
+		oem_battery_volts_set_status(vbat);
+		oem_battery_temp_set_status(temp);
+		oem_camera_therm_set_status(camera_therm);
+		oem_substrate_therm_set_status(substrate_therm);
+		oem_usb_therm_set_status(usb_therm);
+
+		oem_pm8921_bms_low_vol_detect_standby(temp);
+
+		pa_therm_monit_freq = 0;
+		camera_temp_monit_freq = 0;
+		substrate_therm_monit_freq = 0;
+		usb_therm_monit_freq = 0;
+	}else{
+		rc = oem_hkadc_get_battery_uvolts(&vbat);
+		rc |= oem_hkadc_get_battery_temp(&temp);
+		oem_battery_volts_set_status(vbat);
+		oem_battery_temp_set_status(temp);
+
+		pa_therm_monit_freq++;
+		camera_temp_monit_freq++;
+		substrate_therm_monit_freq++;
+		usb_therm_monit_freq++;
+
+		if (pa_therm_monit_freq >= HKADC_PA_THERM_MONIT_FREQ){
+			pa_therm_monit_freq=0;
+			oem_hkadc_get_pa_therm();
+		}
+		if (camera_temp_monit_freq >= HKADC_CAMERA_TEMP_MONIT_FREQ){
+			camera_temp_monit_freq=0;
+			oem_hkadc_get_camera_therm(&camera_therm);
+			oem_camera_therm_set_status(camera_therm);
+		}
+		if (substrate_therm_monit_freq >= HKADC_SUBSTRATE_THERM_MONIT_FREQ){
+			substrate_therm_monit_freq=0;
+			oem_hkadc_get_substrate_therm(&substrate_therm);
+			oem_substrate_therm_set_status(substrate_therm);
+		}
+		if (usb_therm_monit_freq >= HKADC_USB_THERM_MONIT_FREQ){
+			usb_therm_monit_freq=0;
+			oem_hkadc_get_usb_therm(&usb_therm);
+			oem_usb_therm_set_status(usb_therm);
+		}
+
+		oem_pm8921_bms_low_vol_detect_active(vbat, temp, rc);
+	}
+
+	oem_vbatt = vbat;
+	oem_batt_temp = temp;
+
+	if (the_chip->dc_present || the_chip->usb_present || oem_stand_detect) {
+		oem_charger_check_battery_detection_state();
+	}
+
+	oem_batt_health = get_prop_batt_health(the_chip);
+
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+	oem_stand_check();
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+
+	oem_charger_monitor();
+
+	oem_charger_get_connect_state();
+
+	oem_chg_check_charger_removal_after_timer_expired();
+
+	oem_chg_recharge_check_after_timer_expired();
+
+	oem_chg_check_adapter_overvoltage_after_timer_expired();
+
+	oem_chg_vbat_ov_check_after_timer_expired();
+
+	oem_chg_check_battery_detection_after_timer_expired();
+
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+	oem_chg_stand_check_control();
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+
+	oem_judge_charge_state();
+
+	oem_pm8921_bms_calculate_cyclecorrection();
+
+	oem_chg_check_vbatt_ov();
+
+	if (is_hkadc_suspend_monit){
+		wake_unlock(&oem_hkadc_wake_lock);
+		is_hkadc_suspend_monit = 0;
+	}
+	power_supply_changed(&the_chip->batt_psy);
+	power_supply_changed(&the_chip->usb_psy);
+	power_supply_changed(&the_chip->dc_psy);
+	power_supply_changed(&the_chip->bms_psy);
+
+	alarm_cancel(&androidalarm);
+	androidalarm_interval_timespec = ktime_to_timespec(alarm_get_elapsed_realtime());
+	androidalarm_interval_timespec.tv_sec += HKADC_SUSPEND_MONIT_FREQ;
+	androidalarm_interval_timespec.tv_nsec = 0;
+	alarm_start_range(&androidalarm, timespec_to_ktime(androidalarm_interval_timespec),
+		timespec_to_ktime(androidalarm_interval_timespec));
+
+	schedule_delayed_work(&oem_hkadc_work,
+			round_jiffies_relative(msecs_to_jiffies(OEM_HKADC_MONITOR_TIME_1S)));
+}
+
+static void oem_hkadc_alarm_handler(struct alarm *alarm)
+{
+	return;
+}
+
+static void oem_hkadc_early_suspend(struct early_suspend *h)
+{
+	return;
+}
+static void oem_hkadc_early_resume(struct early_suspend *h)
+{
+	return;
+}
+
+static void oem_hkadc_init(void)
+{
+	memset(&oem_hkadc_master_data, 0x0, sizeof(oem_hkadc_master_data));
+
+	oem_hkadc_init_battery_uvolts();
+	oem_hkadc_init_battery_temp();
+	oem_hkadc_init_camera_therm();
+	oem_hkadc_init_substrate_therm();
+	oem_hkadc_init_pa_therm();
+	oem_hkadc_init_battery_current();
+	oem_hkadc_init_usb_therm();
+
+	atomic_set(&is_hkadc_initialized, 1);
+
+	camera_temp_monit_freq = 0;
+	substrate_therm_monit_freq = 0;
+
+	hkadc_early_suspend.level = EARLY_SUSPEND_LEVEL_DISABLE_FB;
+	hkadc_early_suspend.suspend = oem_hkadc_early_suspend;
+	hkadc_early_suspend.resume = oem_hkadc_early_resume;
+	register_early_suspend(&hkadc_early_suspend);
+
+	MASTERDATA_SPINLOCK_INIT();
+	wake_lock_init(&oem_hkadc_wake_lock, WAKE_LOCK_SUSPEND, "oem_hkadc");
+
+	INIT_DELAYED_WORK(&oem_hkadc_work, oem_hkadc_monitor);
+	schedule_delayed_work(&oem_hkadc_work,
+			round_jiffies_relative(msecs_to_jiffies(0)));
+
+	alarm_init(&androidalarm,
+		ANDROID_ALARM_ELAPSED_REALTIME_WAKEUP,
+		oem_hkadc_alarm_handler);
+		}
+
+static void oem_hkadc_exit(void)
+{
+	int rc;
+
+	rc = alarm_cancel(&androidalarm);
+	pr_debug("alarm_cancel result=%d\n", rc);
+
+	atomic_set(&is_hkadc_initialized, 0);
+	}
+
+int32_t kcbms_get_substrate_therm(int32_t *temp){
+
+	int ret;
+
+	ret = oem_hkadc_master_data_read(POWER_SUPPLY_PROP_OEM_SUBSTRATE_THERM, temp);
+	pr_debug("ret = %d substrate_therm = %d\n", ret, *temp);
+
+	return ret;
+}
+
+static int oem_charger_pm_batt_power_get_property(enum power_supply_property psp, int *intval)
+{
+	int ret = 0;
+
+	switch (psp) {
+	case POWER_SUPPLY_PROP_OEM_CHARGE_CONNECT_STATE:
+		ret = oem_charger_master_data_read(psp, intval);
+		pr_debug("charger connect state = %d\n", *intval);
+		break;
+
+	default:
+		ret = -EINVAL;
+	}
+	return ret;
+	}
+
+static void oem_chargermonit_init(void)
+{
+	oem_charger_init_connect_state();
+	atomic_set(&is_chargermonit_initialized, 1);
+	pr_debug("oem_chargermonit_init()\n");
+
+	}
+
+static void oem_chargermonit_exit(void)
+{
+	atomic_set(&is_chargermonit_initialized, 0);
+	}
+
+void oem_hkadc_vrefbat_on(void)
+{
+	int rc;
+	if (the_chip){
+
+		rc = pm_chg_masked_write(the_chip, CHG_CNTRL_2, VREF_BATT_THERM_FORCE_ON_2,
+						VREF_BATT_THERM_FORCE_ON_2);
+		if (rc)
+			pr_err("Failed to Force Vref therm(2) on rc=%d\n", rc);
+	}
+}
+
+void oem_hkadc_vrefbat_off(void)
+{
+		return;
+	}
+
+unsigned int oem_chg_is_dc_present(void)
+{
+	return the_chip->dc_present;
+}
+
+unsigned int oem_chg_is_usb_present(void)
+{
+	return the_chip->usb_present;
+	}
+
+int oem_chg_get_oem_stand_detect(void)
+{
+	return oem_stand_detect;
+	}
+
+int oem_chg_get_charge_state(void)
+{
+	return charge_state;
+	}
+
+int oem_chg_get_prop_batt_status(void)
+{
+	return get_prop_batt_status(the_chip);
+	}
+
+int oem_chg_get_prop_charge_type(void)
+{
+	return get_prop_charge_type(the_chip);
+}
+
+#define THRESHOLD_VBATT_UV_LO        3800000
+#define THRESHOLD_VBATT_UV_HI        4200000
+#define INTERVAL_STAND_CHECK_FIRST   5*60
+#define INTERVAL_STAND_CHG_START     30
+#define IBATMAX_500                  500
+#define IBATMAX_1000                 1000
+#define GPIO_BAT_OVP_RST_N           8
+#define GPIO_CHG_TBATT2_ON           57
+#define GPIO_CHG_TBATT2              58
+#define GPIO_CHG_DET_N               69
+#define GPIO_BAT_OVP_N               70
+#define GPIO_INPUT_LO                0
+#define GPIO_INPUT_HI                1
+#define NOT_DETECT                   0
+#define DETECT_LO_PRE_FIX            1
+#define DETECT_LO_FIX                2
+#define DETECT_STAND                 1
+#define THRESHOLD_IBAT_STAND_CHARGE_STOP_LO (-1500000)
+#define THRESHOLD_IBAT_STAND_CHARGE_STOP_HI (-3000000)
+#define THRESHOLD_DCIN               6000000
+
+#define THRESHOLD_DCIN_HI (4400 * 1000)
+#define THRESHOLD_DCIN_LO (1000 * 1000)
+
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+static void oem_stand_check(void)
+{
+	struct pm8xxx_adc_chan_result result;
+	int ret;
+
+	if (((DETECT_STAND == oem_stand_detect) && (1 != oem_charge_stand_flag)) &&
+		(0 == oem_stand_detect_time_counter)) {
+		ret = pm8xxx_adc_read(CHANNEL_DCIN, &result);
+		if (ret) {
+			pr_err("Failed to reading dcin, rc = %d\n", ret);
+		return;
+	}
+
+		if (((THRESHOLD_DCIN_HI) >= result.physical) &&
+		    ((THRESHOLD_DCIN_LO) <= result.physical)) {
+			oem_pm8921_disable_source_current(true);
+			oem_stand_detect_time_counter = 1;
+	}
+}
+
+	if (1 <= oem_stand_detect_time_counter) {
+		oem_stand_detect_time_counter ++;
+		if (4 == oem_stand_detect_time_counter) {
+			oem_pm8921_disable_source_current(false);
+			oem_stand_detect_time_counter = 0;
+		}
+	}
+}
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+static int oem_chg_stand_on(void)
+{
+	gpio_set_value(GPIO_BAT_OVP_RST_N, 1);
+
+	mdelay(100);
+
+	gpio_set_value(GPIO_BAT_OVP_RST_N, 0);
+
+	gpio_set_value(GPIO_CHG_TBATT2_ON, 1);
+
+	mdelay(100);
+
+	oem_charge_stand_flag = 1;
+
+	enable_irq(gpio_to_irq(GPIO_BAT_OVP_N));
+
+	schedule_work(&fast_chg_count_start_work);
+
+	return 0;
+}
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+static int oem_chg_stand_off(void)
+{
+	mdelay(100);
+
+	gpio_set_value(GPIO_CHG_TBATT2_ON, 0);
+
+	oem_charge_stand_flag = 0;
+
+	oem_chg_stand_charge_timer = INTERVAL_STAND_CHECK_FIRST;
+
+	return 0;
+	}
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+static bool oem_chg_ibatt_check(void)
+{
+	bool ibatt = true;
+	int get_ibatt = 0;
+	int rc;
+
+	rc = get_prop_batt_current(the_chip, &get_ibatt);
+	if ((oem_param_charger.i_chg_adp_chk * -1000) < get_ibatt) {
+		pr_err("ibatt error %duA\n", get_ibatt);
+		ibatt = false;
+	}
+
+	return ibatt;
+}
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+static bool oem_chg_dcin_check(void)
+{
+	struct pm8xxx_adc_chan_result result;
+	int rc = 0;
+	bool dcin = true;
+
+	rc = pm8xxx_adc_read(CHANNEL_DCIN, &result);
+	if (rc) {
+		pr_err("Failed to reading dcin, rc = %d\n", rc);
+	}
+	pr_debug("dcin(6x) : %lld\n", result.physical);
+	if (THRESHOLD_DCIN < result.physical) {
+		dcin = false;
+	}
+
+	return dcin;
+}
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+static bool oem_chg_dcr_check(void)
+{
+	int rc = 0;
+	int vbatt_1 = 0, vbatt_2 = 0;
+	int ibatt_1 = 0, ibatt_2 = 0;
+	int calc_dcr = 0;
+	bool dcr = true;
+	struct pm8xxx_adc_chan_result result;
+
+	rc = pm_chg_ibatmax_set(the_chip, IBATMAX_500);
+	if (rc) {
+		pr_err("Failed to set max current to 400 rc=%d [500mA]\n", rc);
+	}
+	mdelay(100);
+	rc = pm8xxx_adc_read(the_chip->vbat_channel, &result);
+	if (rc) {
+		pr_err("error reading adc channel = %d, rc = %d\n",
+					the_chip->vbat_channel, rc);
+		return false;
+	}
+	vbatt_1 = (int)result.physical;
+	rc = get_prop_batt_current(the_chip, &ibatt_1) * (-1);
+	if (rc) {
+		pr_err("error reading batt current1 rc = %d\n", rc);
+	}
+
+	rc = pm_chg_ibatmax_set(the_chip, IBATMAX_1000);
+	if (rc) {
+		pr_err("Failed to set max current to 400 rc=%d [1000mA]\n", rc);
+	}
+	mdelay(100);
+	rc = pm8xxx_adc_read(the_chip->vbat_channel, &result);
+	if (rc) {
+		pr_err("error reading adc channel = %d, rc = %d\n",
+					the_chip->vbat_channel, rc);
+		return false;
+	}
+	vbatt_2 = (int)result.physical;
+	rc = get_prop_batt_current(the_chip, &ibatt_2) * (-1);
+	if (rc) {
+		pr_err("error reading batt current2 rc = %d\n", rc);
+	}
+
+	if (ibatt_1 != ibatt_2) {
+		calc_dcr = ((vbatt_2 - vbatt_1) * 1000) / (ibatt_2 - ibatt_1);
+	} else {
+		calc_dcr = 0;
+	}
+
+	if (oem_param_charger.z_chg_adp_chk < calc_dcr) {
+		dcr = false;
+	}
+
+	rc = pm_chg_ibatmax_set(the_chip, the_chip->max_bat_chg_current);
+	if (rc) {
+		pr_err("Failed to set max current to 400 rc=%d\n", rc);
+	}
+
+	return dcr;
+}
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+static int oem_tbatt2_detect = 0;
+static int oem_det_n_detect  = 0;
+struct delayed_work oem_chg_tbatt2_work;
+struct delayed_work oem_chg_det_n_work;
+struct delayed_work oem_bat_ovp_n_work;
+struct wake_lock charging_stand_wake_lock;
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+static void oem_chg_stand_check_control(void)
+{
+	bool check = true;
+	int get_ibatt = 0;
+	int fsm_state;
+	int rc;
+
+	fsm_state = pm_chg_get_fsm_state(the_chip);
+	if((the_chip->dc_present || oem_stand_detect) &&
+		 (fsm_state == FSM_STATE_FAST_CHG_7) &&
+		 (pm_chg_get_rt_status(the_chip, FASTCHG_IRQ)) &&
+		 !delayed_work_pending(&the_chip->eoc_work)) {
+		wake_lock(&the_chip->eoc_wake_lock);
+		schedule_delayed_work(&the_chip->eoc_work,
+			round_jiffies_relative(msecs_to_jiffies(EOC_CHECK_PERIOD_MS)));
+	}
+
+	if (oem_stand_detect != DETECT_STAND){
+		pr_debug("oem_stand_detect not DETECT_STAND:%d\n", oem_stand_detect);
+		return;
+	} else {
+		if (GPIO_INPUT_HI == gpio_get_value(GPIO_CHG_DET_N)) {
+			oem_det_n_detect = NOT_DETECT;
+			schedule_delayed_work(&oem_chg_det_n_work,
+					round_jiffies_relative(msecs_to_jiffies(100)));
+		}
+		if (GPIO_INPUT_HI == gpio_get_value(GPIO_CHG_TBATT2)) {
+			oem_tbatt2_detect = NOT_DETECT;
+			schedule_delayed_work(&oem_chg_tbatt2_work,
+				round_jiffies_relative(msecs_to_jiffies(100)));
+		}
+	}
+
+	if (oem_chg_stand_charge_timer != 0){
+		oem_chg_stand_charge_timer--;
+		pr_debug("oem_chg_stand_charge_timer count. remain:%d\n", oem_chg_stand_charge_timer);
+		return;
+	}
+
+	if (0 == oem_charge_stand_flag) {
+		do {
+			if ((!pm_chg_get_rt_status(the_chip, FASTCHG_IRQ)) &&
+			    (!oem_pm8921_bms_is_cyclecorrection_chargeoffstate())) {
+				pr_debug("Not Fast Charge\n");
+				check = false;
+				break;
+			}
+			if (((oem_param_charger.chg_adp_tmp1 * 10) > oem_batt_temp) ||
+				((oem_param_charger.chg_adp_tmp3 * 10) < oem_batt_temp)) {
+				pr_debug("Batt Temp NG [%d]\n", oem_batt_temp);
+				check = false;
+				break;
+			}
+			if ((THRESHOLD_VBATT_UV_LO > oem_vbatt) ||
+				(THRESHOLD_VBATT_UV_HI < oem_vbatt)) {
+				pr_debug("VBATT NG [%d]\n", oem_vbatt);
+				check = false;
+				break;
+			}
+			if (!oem_chg_ibatt_check()) {
+				pr_debug("IBATT NG\n");
+				check = false;
+				break;
+			}
+			if (!oem_chg_dcin_check() || pm_chg_get_rt_status(the_chip, DCIN_OV_IRQ)){
+				pr_debug("Stand Charge do not start -dcin voltage NG detected.\n");
+				check = false;
+				break;
+			}
+			if (!oem_chg_dcr_check()) {
+				pr_debug("DCR NG\n");
+				check = false;
+				break;
+			}
+		} while(0);
+
+		if (check) {
+			oem_chg_stand_on();
+			pr_debug("stand charge start. \n");
+		}
+
+	} else {
+		do {
+			if (((oem_param_charger.chg_adp_tmp1 * 10) > oem_batt_temp) ||
+				((oem_param_charger.chg_adp_tmp2 * 10) < oem_batt_temp)) {
+				pr_debug("Stand Charge Stop batt_temp=%d\n", oem_batt_temp);
+				check = false;
+				break;
+			}
+			if (!is_batterydetected){
+				pr_debug("Stand Charge Stop -battery removed.\n");
+				check = false;
+				break;
+			}
+			if (pm_chg_get_rt_status(the_chip, DCIN_OV_IRQ)){
+				pr_debug("Stand Charge Stop -adapter over voltage detected.\n");
+				check = false;
+				break;
+			}
+			if ((oem_param_charger.chg_stop_volt * 1000) <= oem_vbatt){
+				pr_debug("Stand Charge Stop -battery voltage NG detected.\n");
+				check = false;
+				break;
+			}
+			if (!oem_chg_dcin_check()){
+				pr_debug("Stand Charge Stop -dcin voltage NG detected.\n");
+				check = false;
+				break;
+			}
+			if (OEM_STATUS_NORMAL != oem_charge_status) {
+				pr_debug("Stand Charge Stop -function limitation oem_charge_status=%d.\n",
+				        oem_charge_status);
+				check = false;
+				break;
+	}
+
+			rc = get_prop_batt_current(the_chip, &get_ibatt);
+			if ((THRESHOLD_IBAT_STAND_CHARGE_STOP_LO <= (get_ibatt))||
+			    (THRESHOLD_IBAT_STAND_CHARGE_STOP_HI > (get_ibatt))){
+				pr_debug("Stand Charge Stop -ibat NG detected.%d\n", get_ibatt);
+				check = false;
+				break;
+	}
+
+		} while(0);
+
+		if (!check) {
+			oem_chg_stand_off();
+			pr_debug("stand charge end. \n");
+		}
+	}
+}
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+irqreturn_t oem_chg_tbatt2_isr(int irq, void *ptr);
+irqreturn_t oem_chg_det_n_isr(int irq, void *ptr);
+
+static bool from_oem_chg_tbatt2_isr = false;
+static bool oem_repeat_tbatt2 = false;
+
+static void oem_chg_tbatt2_control(struct work_struct *work)
+{
+	int rc = 0;
+	int gpio_trigger = 0;
+
+	if (GPIO_INPUT_LO == gpio_get_value(GPIO_CHG_TBATT2)) {
+		if (NOT_DETECT == oem_tbatt2_detect) {
+			oem_tbatt2_detect = DETECT_LO_PRE_FIX;
+			oem_repeat_tbatt2 = true;
+		} else if (DETECT_LO_PRE_FIX == oem_tbatt2_detect) {
+			oem_tbatt2_detect = DETECT_LO_FIX;
+			gpio_trigger = IRQF_TRIGGER_HIGH;
+		}
+		
+		if ((DETECT_LO_FIX == oem_tbatt2_detect) &&
+		    (DETECT_LO_FIX == oem_det_n_detect)) {
+			oem_stand_detect = DETECT_STAND;
+			the_chip->dc_present = 1;
+			oem_chg_stand_charge_timer = INTERVAL_STAND_CHG_START;
+		}
+	} else {
+		if (NOT_DETECT != oem_tbatt2_detect) {
+			oem_tbatt2_detect = NOT_DETECT;
+			oem_repeat_tbatt2 = true;
+		} else {
+			if (NOT_DETECT != oem_stand_detect) {
+				if (1 == oem_charge_stand_flag) {
+					oem_chg_stand_off();
+	}
+				oem_stand_detect = NOT_DETECT;
+				cancel_delayed_work_sync(&fast_chg_limit_work);
+				is_oem_fast_chg_counting=false;
+				the_chip->dc_present = 0;
+				pr_debug("oem_chg_tbatt2_control stand removed.\n");
+			}
+			wake_unlock(&charging_stand_wake_lock);
+			gpio_trigger = IRQF_TRIGGER_LOW;
+		}
+	}
+
+	if (oem_repeat_tbatt2) {
+		oem_repeat_tbatt2 = false;
+		schedule_delayed_work(&oem_chg_tbatt2_work,
+				round_jiffies_relative(msecs_to_jiffies(100)));
+		return;
+	}
+
+	if (from_oem_chg_tbatt2_isr) {
+		from_oem_chg_tbatt2_isr = false;
+		free_irq(gpio_to_irq(GPIO_CHG_TBATT2), 0);
+		rc = request_irq(gpio_to_irq(GPIO_CHG_TBATT2), oem_chg_tbatt2_isr, gpio_trigger, "CHG_TBATT2", 0);
+	if (rc) {
+			pr_err("couldn't register interrupts rc=%d\n", rc);
+		}
+		return;
+	}
+
+	}
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+static bool from_oem_chg_det_n_isr = false;
+static bool oem_repeat_det_n = false;
+
+static void oem_chg_det_n_control(struct work_struct *work)
+{
+	int rc = 0;
+	int gpio_trigger = 0;
+
+	if (GPIO_INPUT_LO == gpio_get_value(GPIO_CHG_DET_N)) {
+		if (NOT_DETECT == oem_det_n_detect) {
+			oem_det_n_detect = DETECT_LO_PRE_FIX;
+			oem_repeat_det_n = true;
+		} else if (DETECT_LO_PRE_FIX == oem_det_n_detect) {
+			oem_det_n_detect = DETECT_LO_FIX;
+			gpio_trigger = IRQF_TRIGGER_HIGH;
+		}
+		
+		if ((DETECT_LO_FIX == oem_det_n_detect) &&
+		    (DETECT_LO_FIX == oem_tbatt2_detect)) {
+			oem_stand_detect = DETECT_STAND;
+			the_chip->dc_present = 1;
+			oem_chg_stand_charge_timer = INTERVAL_STAND_CHG_START;
+		}
+	} else {
+		if (NOT_DETECT != oem_det_n_detect) {
+			oem_det_n_detect = NOT_DETECT;
+			oem_repeat_det_n = true;
+		} else {
+			if (NOT_DETECT != oem_stand_detect) {
+				if (1 == oem_charge_stand_flag) {
+					oem_chg_stand_off();
+	}
+				oem_stand_detect = NOT_DETECT;
+				cancel_delayed_work_sync(&fast_chg_limit_work);
+				is_oem_fast_chg_counting=false;
+				the_chip->dc_present = 0;
+				pr_debug("oem_chg_det_n_control stand removed.\n");
+		}
+			wake_unlock(&charging_stand_wake_lock);
+			gpio_trigger = IRQF_TRIGGER_LOW;
+	}
+		}
+
+	if (oem_repeat_det_n) {
+		oem_repeat_det_n = false;
+		schedule_delayed_work(&oem_chg_det_n_work,
+				round_jiffies_relative(msecs_to_jiffies(100)));
+		return;
+	}
+
+	if (from_oem_chg_det_n_isr) {
+		from_oem_chg_det_n_isr = false;
+		free_irq(gpio_to_irq(GPIO_CHG_DET_N), 0);
+		rc = request_irq(gpio_to_irq(GPIO_CHG_DET_N), oem_chg_det_n_isr, gpio_trigger, "CHG_DET_N", 0);
+		if (rc) {
+			pr_err("couldn't register interrupts rc=%d\n", rc);
+		}
+		return;
+	}
+
+	}
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+static void oem_bat_ovp_n_control(struct work_struct *work)
+{
+	oem_chg_stand_off();
+	}
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+irqreturn_t oem_chg_tbatt2_isr(int irq, void *ptr)
+{
+	disable_irq_nosync(gpio_to_irq(GPIO_CHG_TBATT2));
+
+	if (GPIO_INPUT_LO == gpio_get_value(GPIO_CHG_TBATT2)) {
+		oem_tbatt2_detect = DETECT_LO_PRE_FIX;
+		wake_lock(&charging_stand_wake_lock);
+	} else {
+		oem_tbatt2_detect = NOT_DETECT;
+	}
+
+	from_oem_chg_tbatt2_isr = true;
+
+	schedule_delayed_work(&oem_chg_tbatt2_work,
+			round_jiffies_relative(msecs_to_jiffies(100)));
+
+	return IRQ_HANDLED;
+		}
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+irqreturn_t oem_chg_det_n_isr(int irq, void *ptr)
+{
+	disable_irq_nosync(gpio_to_irq(GPIO_CHG_DET_N));
+
+	if (GPIO_INPUT_LO == gpio_get_value(GPIO_CHG_DET_N)) {
+		oem_det_n_detect = DETECT_LO_PRE_FIX;
+		wake_lock(&charging_stand_wake_lock);
+	} else {
+		oem_det_n_detect = NOT_DETECT;
+			}
+
+	from_oem_chg_det_n_isr = true;
+
+	schedule_delayed_work(&oem_chg_det_n_work,
+			round_jiffies_relative(msecs_to_jiffies(100)));
+
+	return IRQ_HANDLED;
+		}
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+
+#ifdef CONFIG_CHARGE_STAND_SUPPORT
+irqreturn_t oem_bat_ovp_n_isr(int irq, void *ptr)
+{
+	disable_irq_nosync(gpio_to_irq(GPIO_BAT_OVP_N));
+
+	if ((GPIO_INPUT_LO == gpio_get_value(GPIO_BAT_OVP_N)) &&
+		(1 == oem_charge_stand_flag)) {
+		schedule_delayed_work(&oem_bat_ovp_n_work,
+				round_jiffies_relative(msecs_to_jiffies(0)));
+	}
+
+	return IRQ_HANDLED;
+}
+#endif /* CONFIG_CHARGE_STAND_SUPPORT */
+

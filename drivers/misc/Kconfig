@@ -570,6 +570,11 @@ config TSIF_DEBUG
 	---help---
 	  This turns on debugging information for the tsif driver
 
+config DTVTUNER_PM
+	bool "dtvtuner_pm"
+	depends on ARCH_MSM
+	default m
+
 config TSPP
 	depends on ARCH_MSM
 	tristate "TSPP (Transport Stream Packet Processor) Support"

@@ -1064,4 +1064,7 @@ static inline void slim_set_clientdata(struct slim_device *dev, void *data)
 {
 	dev_set_drvdata(&dev->dev, data);
 }
+
+extern unsigned int msm_get_state(struct slim_controller *ctrl);
+
 #endif /* _LINUX_SLIMBUS_H */

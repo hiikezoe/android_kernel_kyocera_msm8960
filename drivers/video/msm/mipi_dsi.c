@@ -110,7 +110,10 @@ static int mipi_dsi_off(struct platform_device *pdev)
 				if (MDP_REV_303 != mdp_rev)
 					gpio_free(vsync_gpio);
 			}
+#ifdef CONFIG_FB_MSM_MIPI_NOVATEK_CMD_WXGA_PT
+#else /* CONFIG_FB_MSM_MIPI_NOVATEK_CMD_WXGA_PT */
 			mipi_dsi_set_tear_off(mfd);
+#endif /* CONFIG_FB_MSM_MIPI_NOVATEK_CMD_WXGA_PT */
 		}
 	}
 
@@ -315,7 +318,10 @@ static int mipi_dsi_on(struct platform_device *pdev)
 					}
 				}
 			}
+#ifdef CONFIG_FB_MSM_MIPI_NOVATEK_CMD_WXGA_PT
+#else /* CONFIG_FB_MSM_MIPI_NOVATEK_CMD_WXGA_PT */
 			mipi_dsi_set_tear_on(mfd);
+#endif /* CONFIG_FB_MSM_MIPI_NOVATEK_CMD_WXGA_PT */
 		}
 		mipi_dsi_clk_disable();
 		mipi_dsi_unprepare_clocks();
@@ -436,6 +442,7 @@ static int mipi_dsi_probe(struct platform_device *pdev)
 		if (mipi_dsi_clk_init(pdev))
 			return -EPERM;
 
+#ifndef CONFIG_FB_MSM_MIPI_NOVATEK_CMD_WXGA_PT
 		if (mipi_dsi_pdata->splash_is_enabled &&
 			!mipi_dsi_pdata->splash_is_enabled()) {
 			mipi_dsi_prepare_ahb_clocks();
@@ -446,6 +453,7 @@ static int mipi_dsi_probe(struct platform_device *pdev)
 			mipi_dsi_ahb_ctrl(0);
 			mipi_dsi_unprepare_ahb_clocks();
 		}
+#endif /* CONFIG_FB_MSM_MIPI_NOVATEK_CMD_WXGA_PT */
 		mipi_dsi_resource_initialized = 1;
 
 		return 0;

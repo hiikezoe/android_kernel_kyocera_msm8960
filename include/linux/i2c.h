@@ -497,6 +497,11 @@ static inline int i2c_adapter_id(struct i2c_adapter *adap)
 			i2c_del_driver)
 
 #endif /* I2C */
+
+extern void i2c_compulsory_reset(struct i2c_adapter *adap, int scl, int sda);
+extern void i2c_reset_S7780A(struct i2c_adapter *adap);
+extern void i2c_reset_device(struct i2c_adapter *adap);
+
 #endif /* __KERNEL__ */
 
 /**

@@ -71,6 +71,9 @@
 #define MSG_ID_PIX0_UPDATE_ACK          52
 #define MSG_ID_PREV_STOP_ACK            53
 #define MSG_ID_OUTPUT_TERTIARY3         54
+#define MSG_ID_ERROR_TIMEOUT            55
+#define MSG_ID_ERROR_I2C                56
+#define MSG_ID_ERROR_TEMPERATURE        57
 
 
 /* ISP command IDs */

@@ -772,6 +772,7 @@ qup_i2c_xfer(struct i2c_adapter *adap, struct i2c_msg msgs[], int num)
 	int rem = num;
 	long timeout;
 	int err;
+	bool bIsAnyoneError = true;
 
 	pm_runtime_get_sync(dev->dev);
 	mutex_lock(&dev->mlock);
@@ -786,9 +787,20 @@ qup_i2c_xfer(struct i2c_adapter *adap, struct i2c_msg msgs[], int num)
 		int fs_div;
 		int hs_div;
 		uint32_t fifo_reg;
+		uint32_t gsbi_config;
 
 		if (dev->gsbi) {
+			if (dev->pdata->gsbi_protocol_code) {
+				dev_dbg(dev->dev, "gsbi_protocol_code = 0x%x\n", dev->pdata->gsbi_protocol_code);
+				gsbi_config = readl_relaxed(dev->gsbi);
+				dev_dbg(dev->dev, "Read  gsbi_config  = 0x%x\n", gsbi_config);
+				gsbi_config = ((gsbi_config & ~(0x70)) | (dev->pdata->gsbi_protocol_code & 0x70));
+				dev_dbg(dev->dev, "Write gsbi_config  = 0x%x\n", gsbi_config);
+				writel_relaxed(gsbi_config, dev->gsbi);
+				dev_dbg(dev->dev, "Read  gsbi_config  = 0x%x\n", readl_relaxed(dev->gsbi));
+			} else {
 			writel_relaxed(0x2 << 4, dev->gsbi);
+			}
 			/* GSBI memory is not in the same 1K region as other
 			 * QUP registers. mb() here ensures that the GSBI
 			 * register is updated in correct order and that the
@@ -1071,6 +1083,7 @@ timeout_err:
 	}
 
 	ret = num;
+	bIsAnyoneError = false;
  out_err:
 	disable_irq(dev->err_irq);
 	if (dev->num_irqs == 3) {
@@ -1358,6 +1371,10 @@ blsp_core_init:
 		pm_runtime_set_autosuspend_delay(&pdev->dev, MSEC_PER_SEC);
 		pm_runtime_use_autosuspend(&pdev->dev);
 		pm_runtime_enable(&pdev->dev);
+
+		if (pdata->msm_i2c_init_device)
+			pdata->msm_i2c_init_device(&dev->adapter);
+
 		return 0;
 	}
 

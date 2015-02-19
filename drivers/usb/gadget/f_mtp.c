@@ -3,6 +3,8 @@
  *
  * Copyright (C) 2010 Google, Inc.
  * Author: Mike Lockwood <lockwood@android.com>
+ * Copyright (C) 2011 Sony Ericsson Mobile Communications AB.
+ * Copyright (C) 2012 Sony Mobile Communications AB.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -249,23 +251,6 @@ struct mtp_ext_config_desc_function {
 	__u8	reserved[6];
 };
 
-/* MTP Extended Configuration Descriptor */
-struct {
-	struct mtp_ext_config_desc_header	header;
-	struct mtp_ext_config_desc_function    function;
-} mtp_ext_config_desc = {
-	.header = {
-		.dwLength = __constant_cpu_to_le32(sizeof(mtp_ext_config_desc)),
-		.bcdVersion = __constant_cpu_to_le16(0x0100),
-		.wIndex = __constant_cpu_to_le16(4),
-		.bCount = __constant_cpu_to_le16(1),
-	},
-	.function = {
-		.bFirstInterfaceNumber = 0,
-		.bInterfaceCount = 1,
-		.compatibleID = { 'M', 'T', 'P' },
-	},
-};
 
 struct mtp_device_status {
 	__le16	wLength;
@@ -1031,12 +1016,54 @@ static int mtp_ctrlrequest(struct usb_composite_dev *cdev,
 		DBG(cdev, "vendor request: %d index: %d value: %d length: %d\n",
 			ctrl->bRequest, w_index, w_value, w_length);
 
-		if (ctrl->bRequest == 1
-				&& (ctrl->bRequestType & USB_DIR_IN)
-				&& (w_index == 4 || w_index == 5)) {
-			value = (w_length < sizeof(mtp_ext_config_desc) ?
-					w_length : sizeof(mtp_ext_config_desc));
-			memcpy(cdev->req->buf, &mtp_ext_config_desc, value);
+		if((ctrl->bRequest == 1) &&
+				(ctrl->bRequestType & USB_DIR_IN) && (w_index == 4)) {
+			int total = 0;
+			int func_num = 0;
+			int interface_num = 0;
+			struct mtp_ext_config_desc_header *head;
+			struct mtp_ext_config_desc_function *func;
+			struct usb_configuration *cfg;
+			struct usb_function *f;
+
+			head = (struct mtp_ext_config_desc_header *)
+				cdev->req->buf;
+			func = (struct mtp_ext_config_desc_function *)
+				(head + 1);
+
+			/* zero clear */
+			memset(cdev->req->buf, 0x00, cdev->bufsiz);
+
+			list_for_each_entry(cfg, &cdev->configs, list) {
+
+				list_for_each_entry(f, &cfg->functions, list) {
+					if (!f)
+						break;
+
+					interface_num++;
+					func->bFirstInterfaceNumber = func_num;
+					func->bInterfaceCount = 1;
+					if (!strncmp(f->name, "mtp", 3)) {
+						memcpy(func->compatibleID,
+								"MTP", 3);
+						VDBG(cdev,
+								"MTP interface found."
+								"Interface_num: %d.\n",
+								interface_num);
+					}
+					func++;
+					func_num++;
+				}
+			}
+
+			total = sizeof(*head) + (sizeof(*func) * func_num);
+
+			/* header section */
+			head->dwLength = total;
+			head->bcdVersion = __constant_cpu_to_le16(0x0100);
+			head->wIndex = __constant_cpu_to_le16(4);
+			head->bCount = func_num;
+			value = min(w_length, (u16)total);
 		}
 	} else if ((ctrl->bRequestType & USB_TYPE_MASK) == USB_TYPE_CLASS) {
 		DBG(cdev, "class request: %d index: %d value: %d length: %d\n",
@@ -1109,7 +1136,7 @@ mtp_function_bind(struct usb_configuration *c, struct usb_function *f)
 	if (id < 0)
 		return id;
 	mtp_interface_desc.bInterfaceNumber = id;
-	mtp_ext_config_desc.function.bFirstInterfaceNumber = id;
+//	mtp_ext_config_desc.function.bFirstInterfaceNumber = id;
 
 	/* allocate endpoints */
 	ret = mtp_create_bulk_endpoints(dev, &mtp_fullspeed_in_desc,

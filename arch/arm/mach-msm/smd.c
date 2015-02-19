@@ -2681,6 +2681,14 @@ restore_snapshot_count:
 	}
 }
 
+extern void set_smem_crash_system_kernel(void);
+extern void set_smem_crash_system_modem(void);
+extern void set_smem_crash_system_riva(void);
+extern void set_smem_crash_system_lpass(void);
+extern void set_smem_crash_kind_panic(void);
+extern void set_smem_crash_kind_fatal(void);
+extern void set_smem_crash_info_data( const char *pdata );
+extern void set_modemlog_info(void);
 static irqreturn_t smsm_irq_handler(int irq, void *data)
 {
 	unsigned long flags;
@@ -2688,6 +2696,23 @@ static irqreturn_t smsm_irq_handler(int irq, void *data)
 	if (irq == INT_ADSP_A11_SMSM) {
 		uint32_t mux_val;
 		static uint32_t prev_smem_q6_apps_smsm;
+		unsigned lpass = __raw_readl(SMSM_STATE_ADDR(SMSM_Q6_STATE));
+
+		if (lpass & SMSM_RESET) {
+			set_smem_crash_system_lpass();
+			set_smem_crash_kind_fatal();
+			{
+				char buf[33];
+				memset( buf, '\0', sizeof(buf) );
+				snprintf( buf,
+				          sizeof(buf),
+				          "%x;%s",
+				          __LINE__,
+				          __func__
+				);
+				set_smem_crash_info_data( (const char *)buf );
+			}
+		}
 
 		if (smsm_info.intr_mux && cpu_is_qsd8x50()) {
 			mux_val = __raw_readl(
@@ -2708,11 +2733,16 @@ static irqreturn_t smsm_irq_handler(int irq, void *data)
 	} else {
 		unsigned old_apps, apps;
 		unsigned modm = __raw_readl(SMSM_STATE_ADDR(SMSM_MODEM_STATE));
+		unsigned riva = __raw_readl(SMSM_STATE_ADDR(SMSM_WCNSS_STATE));
+		unsigned lpass = __raw_readl(SMSM_STATE_ADDR(SMSM_Q6_STATE));
 
 		old_apps = apps = __raw_readl(SMSM_STATE_ADDR(SMSM_APPS_STATE));
 
 		SMSM_DBG("<SM %08x %08x>\n", apps, modm);
 		if (apps & SMSM_RESET) {
+			set_smem_crash_system_kernel();
+			set_smem_crash_kind_panic();
+			set_smem_crash_info_data( " " );
 			/* If we get an interrupt and the apps SMSM_RESET
 			   bit is already set, the modem is acking the
 			   app's reset ack. */
@@ -2728,6 +2758,19 @@ static irqreturn_t smsm_irq_handler(int irq, void *data)
 
 		} else if (modm & SMSM_RESET) {
 			pr_err("\nSMSM: Modem SMSM state changed to SMSM_RESET.");
+			set_smem_crash_system_modem();
+			set_smem_crash_kind_fatal();
+			{
+				char buf[33];
+				memset( buf, '\0', sizeof(buf) );
+				snprintf( buf,
+				          sizeof(buf),
+				          "%x;%s",
+				          __LINE__,
+				          __func__
+				);
+				set_smem_crash_info_data( (const char *)buf );
+			}
 			if (!disable_smsm_reset_handshake) {
 				apps |= SMSM_RESET;
 				flush_cache_all();
@@ -2735,7 +2778,38 @@ static irqreturn_t smsm_irq_handler(int irq, void *data)
 			}
 			modem_queue_start_reset_notify();
 
+		} else if (riva & SMSM_RESET) {
+			set_smem_crash_system_riva();
+			set_smem_crash_kind_fatal();
+			{
+				char buf[33];
+				memset( buf, '\0', sizeof(buf) );
+				snprintf( buf,
+				          sizeof(buf),
+				          "%x;%s",
+				          __LINE__,
+				          __func__
+				);
+				set_smem_crash_info_data( (const char *)buf );
+			}
+
+		} else if (lpass & SMSM_RESET) {
+			set_smem_crash_system_lpass();
+			set_smem_crash_kind_fatal();
+			{
+				char buf[33];
+				memset( buf, '\0', sizeof(buf) );
+				snprintf( buf,
+				          sizeof(buf),
+				          "%x;%s",
+				          __LINE__,
+				          __func__
+				);
+				set_smem_crash_info_data( (const char *)buf );
+			}
+
 		} else if (modm & SMSM_INIT) {
+			set_modemlog_info();
 			if (!(apps & SMSM_INIT)) {
 				apps |= SMSM_INIT;
 				modem_queue_smsm_init_notify();

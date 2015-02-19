@@ -30,8 +30,14 @@
 #include "msm_fb.h"
 #include "mipi_dsi.h"
 #include "mdp4.h"
+#include "disp_ext.h"
 
+#ifdef CONFIG_DISP_EXT_UTIL_VSYNC
+static int vsync_start_y_adjust = 0;
+#else/*CONFIG_DISP_EXT_UTIL_VSYNC*/
 static int vsync_start_y_adjust = 4;
+#endif/*CONFIG_DISP_EXT_UTIL_VSYNC*/
+static int mdp4_dsi_screen_at_once_flag = 0;
 
 #define MAX_CONTROLLER	1
 
@@ -77,6 +83,11 @@ static struct vsycn_ctrl {
 	u32 last_vsync_ms;
 	struct work_struct clk_work;
 } vsync_ctrl_db[MAX_CONTROLLER];
+
+#ifdef CONFIG_DISP_EXT_UTIL_VSYNC
+void mdp4_mipi_vsync_enable(struct msm_fb_data_type *mfd,
+		struct mdp4_overlay_pipe *pipe, int which);
+#endif /*CONFIG_DISP_EXT_UTIL_VSYNC*/
 
 static void vsync_irq_enable(int intr, int term)
 {
@@ -314,10 +325,12 @@ int mdp4_dsi_cmd_pipe_commit(int cndx, int wait)
 			mdp4_free_writeback_buf(vctrl->mfd, mixer);
 	}
 
+	if(!mdp4_dsi_screen_at_once_flag){
 	if (mdp4_dsi_cmd_clk_check(vctrl) < 0) {
 		mdp4_dsi_cmd_pipe_clean(vp);
 		mutex_unlock(&vctrl->update_lock);
 		return 0;
+	}
 	}
 	mutex_unlock(&vctrl->update_lock);
 
@@ -395,6 +408,10 @@ int mdp4_dsi_cmd_pipe_commit(int cndx, int wait)
 	mdp4_mixer_stage_commit(mixer);
 
 	pipe = vctrl->base_pipe;
+#ifdef CONFIG_DISP_EXT_UTIL_VSYNC
+	/* TE enabled */
+	mdp4_mipi_vsync_enable(vctrl->mfd, pipe, 0);
+#endif /*CONFIG_DISP_EXT_UTIL_VSYNC*/
 	spin_lock_irqsave(&vctrl->spin_lock, flags);
 	if (pipe->ov_blt_addr) {
 		mdp4_dsi_cmd_blt_ov_update(pipe);
@@ -1276,3 +1293,65 @@ void mdp4_dsi_cmd_overlay(struct msm_fb_data_type *mfd)
 	mutex_unlock(&mfd->dma->ov_mutex);
 
 }
+static void mdp4_dsi_cmd_busy( void )
+{
+	struct vsycn_ctrl *vctrl;
+	unsigned long flags;
+	int need_dmap_wait = 0;
+
+	vctrl = &vsync_ctrl_db[0];
+
+	spin_lock_irqsave(&vctrl->spin_lock, flags);
+	if (vctrl->dmap_koff != vctrl->dmap_done) {
+		INIT_COMPLETION(vctrl->dmap_comp);
+		need_dmap_wait = 1;
+	}
+	spin_unlock_irqrestore(&vctrl->spin_lock, flags);
+
+	if (need_dmap_wait) {
+		mdp4_dsi_cmd_wait4dmap(0);
+	}
+}
+
+void mdp4_dsi_refresh_screen_at_once( struct msm_fb_data_type *mfd )
+{
+	int cndx = 0;
+	struct vsycn_ctrl *vctrl;
+	struct mdp4_overlay_pipe *pipe;
+
+    DISP_LOCAL_LOG_EMERG("DISP %s S\n",__func__);
+
+	if( mfd == NULL ){
+		return;
+	}
+
+	vctrl = &vsync_ctrl_db[cndx];
+	pipe = vctrl->base_pipe;
+	if (pipe == NULL) {
+		pr_err("%s: NO base pipe\n", __func__);
+		return;
+	}
+
+	mdp_clk_ctrl(1);
+
+	if (pipe->mixer_stage == MDP4_MIXER_STAGE_BASE) {
+		mdp4_mipi_vsync_enable(mfd, pipe, 0);
+		mdp4_overlay_setup_pipe_addr(mfd, pipe);
+		mdp4_dsi_cmd_pipe_queue(0, pipe);
+	}
+
+	mdp4_overlay_mdp_perf_upd(mfd, 1);
+
+	mdp4_dsi_screen_at_once_flag = 1;
+	mdp4_dsi_cmd_pipe_commit(cndx, 0);
+	mdp4_dsi_screen_at_once_flag = 0;
+	mdp4_dsi_cmd_busy();
+
+	mdp4_overlay_mdp_perf_upd(mfd, 0);
+	mdp_clk_ctrl(0);
+
+    DISP_LOCAL_LOG_EMERG("DISP %s E\n",__func__);
+
+	return;
+}
+

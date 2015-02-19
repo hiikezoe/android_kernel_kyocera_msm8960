@@ -1,0 +1,29 @@
+2013.7.5 KYOCERA Corporation
+
+●ビルド手順
+1. Code Aurora Forum (CAF) よりBase環境をDownloadする。
+    https://www.codeaurora.org/
+
+    Manifest Fileは以下になります。
+    https://www.codeaurora.org/xwiki/bin/QAEP/
+    <Releases on release branch>
+     March 28, 2013  M8960AAAAANLYA2331  msm8960  release  M8960AAAAANLYA2331.xml
+
+    $ repo init -u git://codeaurora.org/platform/manifest.git -b release -m M8960AAAAANLYA2331.xml --repo-url=git://codeaurora.org/tools/repo.git
+    $ repo sync
+
+        注）Download方法及び不明点の詳細はCAFをご参照ください。
+
+2. kernelフォルダを、1.でDownloadした環境に上書きします。
+
+3. 環境変数PATHにJava Development Kit (JDK) のpathを追加します。
+    $ export PATH=<JDKのInstallPath>/bin:$PATH
+
+4. 下記Commandを実行します。
+    $ source build/envsetup.sh
+    $ choosecombo release msm8960 user
+    $ make clean && make -j8 BOARD_DELTAIMAGE_FILE_SYSTEM_TYPE=ext4 BOARD_SECURITYIMAGE_FILE_SYSTEM_TYPE=ext4 BOARD_KERNEL_CMDLINE=console='ttyHSL0,115200,n8 no_console_suspend=1 androidboot.hardware=qcom user_debug=31 msm_rtb.filter=0x3F ehci-hcd.park=3 maxcpus=2' BOARD_BOOTIMAGE_PARTITION_SIZE=0x00800000 BOARD_RECOVERYIMAGE_PARTITION_SIZE=0x00800000 BOARD_SYSTEMIMAGE_PARTITION_SIZE=973078528 BOARD_USERDATAIMAGE_PARTITION_SIZE=4370464768 BOARD_PERSISTIMAGE_PARTITION_SIZE=8388608 BOARD_CACHEIMAGE_PARTITION_SIZE=209715200 BOARD_DELTAIMAGE_PARTITION_SIZE=654311424 BOARD_TOMBSTONESIMAGE_PARTITION_SIZE=402653184 BOARD_SECURITYIMAGE_PARTITION_SIZE=8388608 BOARD_HAS_ATH_ETH_ALX=false TARGET_RECOVERY_PIXEL_FORMAT='RGBX_8888' BOARD_USES_ADRENO_200=true HAVE_ADRENO200_SOURCE=true HAVE_ADRENO200_SC_SOURCE=true HAVE_ADRENO200_FIRMWARE=true BOARD_HAVE_BLUETOOTH_BLUEZ=true TARGET_ADDITIONAL_BOOTCLASSPATH=qcmediaplayer
+
+    Note:"-j8"はBuild環境に合わせて変更ください。
+
+以上

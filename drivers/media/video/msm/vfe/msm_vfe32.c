@@ -18,6 +18,7 @@
 #include <linux/atomic.h>
 #include <linux/regulator/consumer.h>
 #include <linux/clk.h>
+#include <linux/workqueue.h>
 #include <mach/irqs.h>
 #include <mach/camera.h>
 #include <media/v4l2-device.h>
@@ -59,6 +60,13 @@ struct vfe32_isr_queue_cmd {
 	uint32_t                           vfeInterruptStatus0;
 	uint32_t                           vfeInterruptStatus1;
 };
+
+static struct vfe32_ctrl_type *g_vfe32_ctrl;
+static struct workqueue_struct *frame_wq;
+struct work_struct cam_work;
+static int stream_condition;
+static int stream_exe;
+DECLARE_WAIT_QUEUE_HEAD( wait_q );
 
 static struct vfe32_cmd_type vfe32_cmd[] = {
 /* 0*/	{VFE_CMD_DUMMY_0},
@@ -2063,6 +2071,8 @@ static int vfe32_proc_general(
 			vfe_params.operation_mode;
 
 		rc = vfe32_start(pmctl, vfe32_ctrl);
+	    stream_exe = 1;
+        queue_work(frame_wq, &cam_work);
 		break;
 	case VFE_CMD_UPDATE:
 		vfe32_update(vfe32_ctrl);
@@ -3188,6 +3198,9 @@ static int vfe32_proc_general(
 				goto proc_general_done;
 		}
 
+        stream_exe = 0;
+        stream_condition = 1;
+        wake_up_interruptible(&wait_q);
 		vfe32_stop(vfe32_ctrl);
 		break;
 
@@ -4218,6 +4231,9 @@ static void vfe32_process_reset_irq(
 			/* reload all write masters. (frame & line)*/
 			msm_camera_io_w(0x7FFF,
 				vfe32_ctrl->share_ctrl->vfebase + VFE_BUS_CMD);
+			vfe32_send_isp_msg(&vfe32_ctrl->subdev,
+				vfe32_ctrl->share_ctrl->vfeFrameId,
+				MSG_ID_RESET_ACK);
 		}
 		complete(&vfe32_ctrl->share_ctrl->reset_complete);
 	}
@@ -4403,6 +4419,9 @@ static void vfe_send_outmsg(
 		msg.frameCounter--;
 		CDBG("SOF and Frame IRQs together, adjusting frame counter");
 	}
+
+    stream_condition = 1;
+    wake_up_interruptible(&wait_q);
 
 	v4l2_subdev_notify(&axi_ctrl->subdev,
 			NOTIFY_VFE_MSG_OUT,
@@ -5388,7 +5407,7 @@ static void vfe32_process_irq(
 		vfe32_process_rdi1_reg_update_irq(vfe32_ctrl);
 		break;
 	case VFE_IRQ_STATUS1_RDI2_REG_UPDATE:
-		pr_err("irq	rdi2 regUpdateIrq\n");
+		CDBG("irq	rdi2 regUpdateIrq\n");
 		vfe32_process_rdi2_reg_update_irq(vfe32_ctrl);
 		break;
 	case VFE_IMASK_WHILE_STOPPING_1:
@@ -6096,7 +6115,7 @@ static int msm_axi_subdev_s_crystal_freq(struct v4l2_subdev *sd,
 		return rc;
 	}
 	round_rate = clk_round_rate(axi_ctrl->vfe_clk[0], freq);
-	if (rc < 0) {
+	if (round_rate < 0) {
 		pr_err("%s: clk_round_rate failed %d\n",
 					__func__, rc);
 		return rc;
@@ -6109,6 +6128,26 @@ static int msm_axi_subdev_s_crystal_freq(struct v4l2_subdev *sd,
 					__func__, rc);
 
 	return rc;
+}
+
+static void msm_frame_monitoring(struct work_struct *work)
+{
+    int rc;
+    struct isp_msg_event isp_msg_evt;
+
+    while (stream_exe) {
+        stream_condition = 0;
+        rc = wait_event_interruptible_timeout(wait_q, stream_condition, msecs_to_jiffies(800));
+        if(!rc && stream_exe){
+            isp_msg_evt.msg_id = MSG_ID_ERROR_TIMEOUT;
+            v4l2_subdev_notify(&g_vfe32_ctrl->subdev,
+                    NOTIFY_ISP_MSG_EVT,
+                    (void *)&isp_msg_evt);
+            pr_err("%s: camframe timeout!!\n", __func__);
+            return;
+        }
+    }
+    return;
 }
 
 static const struct v4l2_subdev_core_ops msm_vfe_subdev_core_ops = {
@@ -7552,6 +7591,12 @@ static int __devinit vfe32_probe(struct platform_device *pdev)
 	v4l2_set_subdevdata(&vfe32_ctrl->subdev, vfe32_ctrl);
 	platform_set_drvdata(pdev, &vfe32_ctrl->subdev);
 
+    frame_wq = create_singlethread_workqueue("frame_wq");
+    if(frame_wq)
+    {
+        INIT_WORK(&cam_work, msm_frame_monitoring);
+    }
+
 	axi_ctrl->vfemem = platform_get_resource_byname(pdev,
 					IORESOURCE_MEM, "vfe32");
 	if (!axi_ctrl->vfemem) {
@@ -7651,6 +7696,7 @@ static int __devinit vfe32_probe(struct platform_device *pdev)
 	vfe32_ctrl->pdev = pdev;
 	/*disable bayer stats by default*/
 	vfe32_ctrl->ver_num.main = VFE_STATS_TYPE_LEGACY;
+	g_vfe32_ctrl = vfe32_ctrl;
 	return 0;
 
 vfe32_no_resource:

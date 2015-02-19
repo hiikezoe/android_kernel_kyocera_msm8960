@@ -1034,7 +1034,17 @@ static void krait_apply_vmin(struct acpu_level *tbl)
 		tbl->avsdscr_setting = 0;
 	}
 }
-
+static int 	boot_mode_charger = 0;
+static int __init bootmode(char *str)
+{
+	if(str!=NULL){
+		if(strcmp(str,"charger")==0){
+			boot_mode_charger = 1;
+		}
+	}
+	return 0;
+}
+early_param("androidboot.mode",bootmode);
 static int __init get_speed_bin(u32 pte_efuse)
 {
 	uint32_t speed_bin;
@@ -1049,8 +1059,7 @@ static int __init get_speed_bin(u32 pte_efuse)
 	} else {
 		dev_info(drv.dev, "SPEED BIN: %d\n", speed_bin);
 	}
-
-	return speed_bin;
+	return boot_mode_charger?0:speed_bin;
 }
 
 static int __init get_pvs_bin(u32 pte_efuse)
@@ -1061,13 +1070,24 @@ static int __init get_pvs_bin(u32 pte_efuse)
 	if (pvs_bin == 0x7)
 		pvs_bin = (pte_efuse >> 13) & 0x7;
 
-	if (pvs_bin == 0x7) {
-		pvs_bin = 0;
-		dev_warn(drv.dev, "ACPU PVS: Defaulting to %d\n", pvs_bin);
-	} else {
-		dev_info(drv.dev, "ACPU PVS: %d\n", pvs_bin);
+	switch(pvs_bin){
+		case PVS_SLOW:
+			pr_info("ACPU PVS: Slow\n");
+			break;
+		case PVS_NOMINAL:
+			pr_info("ACPU PVS: Nominal\n");
+			break;
+		case PVS_FAST:
+			pr_info("ACPU PVS: Fast\n");
+			break;
+		case PVS_FASTER:
+			pr_info("ACPU PVS: Faster\n");
+			break;
+		default:
+			pr_info("ACPU PVS: Force Slow(Org Unknown)\n");
+			pvs_bin = PVS_SLOW;
+			break;
 	}
-
 	return pvs_bin;
 }
 

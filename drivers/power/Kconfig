@@ -443,4 +443,8 @@ config AB8500_BATTERY_THERM_ON_BATCTRL
 	  Say Y to enable battery temperature measurements using
 	  thermistor connected on BATCTRL ADC.
 
+config CHARGE_STAND_SUPPORT
+    tristate "Charge stand support"
+	default n
+
 endif # POWER_SUPPLY

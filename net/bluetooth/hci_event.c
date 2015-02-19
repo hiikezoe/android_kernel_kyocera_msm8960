@@ -21,6 +21,10 @@
    COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS
    SOFTWARE IS DISCLAIMED.
 */
+/*====*====*====*====*====*====*====*====*====*====*====*====*====*====*====*
+   This software is contributed or developed by KYOCERA Corporation.
+   (C) 2013 KYOCERA Corporation
+*====*====*====*====*====*====*====*====*====*====*====*====*====*====*====*/
 
 /* Bluetooth HCI event handling. */
 

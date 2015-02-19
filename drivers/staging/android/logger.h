@@ -20,6 +20,9 @@
 #include <linux/types.h>
 #include <linux/ioctl.h>
 
+#include <mach/msm_iomap.h>
+#include "resetlog.h"
+
 /*
  * The userspace structure for version 1 of the logger_entry ABI.
  * This structure is returned to userspace unless the caller requests
@@ -66,5 +69,10 @@ struct logger_entry {
 #define LOGGER_FLUSH_LOG		_IO(__LOGGERIO, 4) /* flush log */
 #define LOGGER_GET_VERSION		_IO(__LOGGERIO, 5) /* abi version */
 #define LOGGER_SET_VERSION		_IO(__LOGGERIO, 6) /* abi version */
+#define LOGGER_INFO_SIZE        (sizeof(struct logger_log_info))
+#define ADDR_LOGGER_INFO_MAIN   ( &((ram_log_info_type *)ADDR_CONTROL_INFO)->info[LOGGER_INFO_MAIN  ] )
+#define ADDR_LOGGER_INFO_SYSTEM ( &((ram_log_info_type *)ADDR_CONTROL_INFO)->info[LOGGER_INFO_SYSTEM] )
+#define ADDR_LOGGER_INFO_EVENTS ( &((ram_log_info_type *)ADDR_CONTROL_INFO)->info[LOGGER_INFO_EVENTS] )
+#define ADDR_LOGGER_INFO_RADIO  ( &((ram_log_info_type *)ADDR_CONTROL_INFO)->info[LOGGER_INFO_RADIO ] )
 
 #endif /* _LINUX_LOGGER_H */

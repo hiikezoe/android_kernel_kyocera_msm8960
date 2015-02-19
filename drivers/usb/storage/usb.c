@@ -73,6 +73,13 @@
 #include "sierra_ms.h"
 #include "option_ms.h"
 
+#define __USB_HOST_MODE_MASS_STORAGE_1__
+
+#ifdef __USB_HOST_MODE_MASS_STORAGE_1__
+int probe_check = 0;
+#endif // __USB_HOST_MODE_MASS_STORAGE_1__
+
+
 /* Some informational data */
 MODULE_AUTHOR("Matthew Dharm <mdharm-usb@one-eyed-alien.net>");
 MODULE_DESCRIPTION("USB Mass Storage driver for Linux");
@@ -1022,6 +1029,12 @@ void usb_stor_disconnect(struct usb_interface *intf)
 {
 	struct us_data *us = usb_get_intfdata(intf);
 
+#ifdef __USB_HOST_MODE_MASS_STORAGE_1__
+	if (probe_check) {
+		probe_check--;
+	}
+#endif // __USB_HOST_MODE_MASS_STORAGE_1__
+
 	US_DEBUGP("storage_disconnect() called\n");
 	quiesce_and_remove_host(us);
 	release_everything(us);
@@ -1046,6 +1059,13 @@ static int storage_probe(struct usb_interface *intf,
 	if (usb_usual_check_type(id, USB_US_TYPE_STOR) ||
 			usb_usual_ignore_device(intf))
 		return -ENXIO;
+
+#ifdef __USB_HOST_MODE_MASS_STORAGE_1__
+	if (probe_check) {
+		return -EPERM;
+	}
+	probe_check++;
+#endif // __USB_HOST_MODE_MASS_STORAGE_1__
 
 	/*
 	 * Call the general probe procedures.
@@ -1099,6 +1119,10 @@ static int __init usb_stor_init(void)
 	int retval;
 
 	pr_info("Initializing USB Mass Storage driver...\n");
+
+#ifdef __USB_HOST_MODE_MASS_STORAGE_1__
+	probe_check = 0;
+#endif // __USB_HOST_MODE_MASS_STORAGE_1__
 
 	/* register the driver, return usb_register return code if error */
 	retval = usb_register(&usb_storage_driver);

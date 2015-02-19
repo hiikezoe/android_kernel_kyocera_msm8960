@@ -12,15 +12,31 @@
 
 #include <linux/module.h>
 #include "msm_actuator.h"
+#include "msm.h"
 
 static struct msm_actuator_ctrl_t msm_actuator_t;
 static struct msm_actuator msm_vcm_actuator_table;
 static struct msm_actuator msm_piezo_actuator_table;
-
+extern struct msm_calib_af imx111_af_data;
+extern uint16_t imx111_dac_40cm;
 static struct msm_actuator *actuators[] = {
 	&msm_vcm_actuator_table,
 	&msm_piezo_actuator_table,
 };
+
+int32_t msm_actuator_evt_notify(struct msm_actuator_ctrl_t *a_ctrl, uint8_t msg_id)
+{
+	int32_t rc = 0;
+	struct msm_cam_media_controller *pmctl =
+		(struct msm_cam_media_controller *)v4l2_get_subdev_hostdata(&a_ctrl->sdev);
+
+	CDBG("%s: E msg_id = %d\n", __func__, msg_id);
+
+	rc = msm_camera_evt_notify(pmctl, msg_id);
+
+	CDBG("%s: X rc = %d\n", __func__, rc);
+	return rc;
+}
 
 static int32_t msm_actuator_piezo_set_default_focus(
 	struct msm_actuator_ctrl_t *a_ctrl,
@@ -40,6 +56,7 @@ static int32_t msm_actuator_piezo_set_default_focus(
 		if (rc < 0) {
 			pr_err("%s: i2c write error:%d\n",
 				__func__, rc);
+			msm_actuator_evt_notify(a_ctrl, MSG_ID_ERROR_I2C);
 			return rc;
 		}
 		a_ctrl->i2c_tbl_index = 0;
@@ -131,8 +148,10 @@ static int32_t msm_actuator_init_focus(struct msm_actuator_ctrl_t *a_ctrl,
 				__func__, type);
 			break;
 		}
-		if (rc < 0)
+		if (rc < 0) {
+			msm_actuator_evt_notify(a_ctrl, MSG_ID_ERROR_I2C);
 			break;
+	}
 	}
 
 	a_ctrl->curr_step_pos = 0;
@@ -206,6 +225,7 @@ static int32_t msm_actuator_piezo_move_focus(
 	if (rc < 0) {
 		pr_err("%s: i2c write error:%d\n",
 			__func__, rc);
+		msm_actuator_evt_notify(a_ctrl, MSG_ID_ERROR_I2C);
 		return rc;
 	}
 	a_ctrl->i2c_tbl_index = 0;
@@ -297,6 +317,7 @@ static int32_t msm_actuator_move_focus(
 	if (rc < 0) {
 		pr_err("%s: i2c write error:%d\n",
 			__func__, rc);
+		msm_actuator_evt_notify(a_ctrl, MSG_ID_ERROR_I2C);
 		return rc;
 	}
 	a_ctrl->i2c_tbl_index = 0;
@@ -530,6 +551,24 @@ static int32_t msm_actuator_config(struct msm_actuator_ctrl_t *a_ctrl,
 			pr_err("%s move focus failed %d\n", __func__, rc);
 		break;
 
+	case CFG_SET_AF_MODE:
+		rc = a_ctrl->func_tbl->actuator_af_mode(a_ctrl,
+			cdata.cfg.mode);
+		if (rc < 0)
+			pr_err("%s afmode failed %d\n", __func__, rc);
+		break;
+
+	case CFG_GET_LENS_POSITION:
+		rc = a_ctrl->func_tbl->actuator_lens_position(a_ctrl,
+			&cdata.cfg.lensposition);
+		if (rc < 0)
+			pr_err("%s lens position failed %d\n", __func__, rc);
+    	if (copy_to_user((void *)argp,
+    		&cdata,
+    		sizeof(struct msm_actuator_cfg_data)))
+    		return -EFAULT;
+		break;
+
 	default:
 		break;
 	}
@@ -644,6 +683,52 @@ struct msm_actuator_ctrl_t *get_actrl(struct v4l2_subdev *sd)
 	return container_of(sd, struct msm_actuator_ctrl_t, sdev);
 }
 
+int32_t msm_actuator_lens_position(struct msm_actuator_ctrl_t *a_ctrl,
+	uint8_t *lens_position)
+{
+    int32_t  rc=0;
+	uint16_t cur_pos=0;
+
+    CDBG("%s\n", __func__);
+
+	rc = msm_camera_i2c_read_act(&a_ctrl->i2c_client,
+		&cur_pos, MSM_CAMERA_I2C_WORD_DATA);
+    CDBG("cur_pos:%04x macro:%04x inf:%04x\n",cur_pos, imx111_af_data.macro_dac, imx111_af_data.inf_dac);
+	if( ((cur_pos >> 4) & 0x03ff) > imx111_dac_40cm )
+		*lens_position = MSM_V4L2_LENS_MACRO;
+	else
+		*lens_position = MSM_V4L2_LENS_INFINITY;
+    CDBG("lens_position %x\n",*lens_position);
+    return rc;
+}
+
+int32_t msm_actuator_af_mode(
+	struct msm_actuator_ctrl_t *a_ctrl,
+	uint8_t mode)
+{
+    int32_t  rc=0;
+    uint8_t  byte1,byte2;
+    uint16_t dac;
+
+    CDBG("%s  mode:%d\n", __func__, mode);
+
+    if( (mode == 1) || (mode == 4)){
+        if(mode == 1){//macro
+            dac = imx111_af_data.macro_dac;
+        }
+        else{//infinity
+            dac = imx111_af_data.inf_dac;
+        }
+
+        byte1 = (uint8_t)(dac >> 4) & 0xFF;
+        byte2 = (uint8_t)(((dac << 4) & 0xF0) | 0x07);
+        CDBG("%02x %02x\n", byte1, byte2);
+    	rc = msm_camera_i2c_write(&a_ctrl->i2c_client,
+	    	byte1, byte2, MSM_CAMERA_I2C_BYTE_DATA);
+    }
+	return rc;
+}
+
 static struct v4l2_subdev_core_ops msm_actuator_subdev_core_ops = {
 	.ioctl = msm_actuator_subdev_ioctl,
 	.s_power = msm_actuator_power,
@@ -672,6 +757,8 @@ static struct msm_actuator msm_vcm_actuator_table = {
 		.actuator_set_default_focus = msm_actuator_set_default_focus,
 		.actuator_init_focus = msm_actuator_init_focus,
 		.actuator_parse_i2c_params = msm_actuator_parse_i2c_params,
+		.actuator_af_mode = msm_actuator_af_mode,
+		.actuator_lens_position = msm_actuator_lens_position,
 	},
 };
 
@@ -685,6 +772,8 @@ static struct msm_actuator msm_piezo_actuator_table = {
 			msm_actuator_piezo_set_default_focus,
 		.actuator_init_focus = msm_actuator_init_focus,
 		.actuator_parse_i2c_params = msm_actuator_parse_i2c_params,
+		.actuator_af_mode = msm_actuator_af_mode,
+		.actuator_lens_position = msm_actuator_lens_position,
 	},
 };
 

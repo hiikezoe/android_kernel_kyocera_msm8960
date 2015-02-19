@@ -42,6 +42,8 @@
 #include <sound/soc-dpcm.h>
 #include <sound/initval.h>
 
+#include <linux/mfd/wcd9xxx/wcd9310_registers.h>
+
 #define CREATE_TRACE_POINTS
 #include <trace/events/asoc.h>
 
@@ -78,6 +80,8 @@ int soc_dpcm_be_platform_resume(struct snd_soc_pcm_runtime *fe);
 static int pmdown_time;
 module_param(pmdown_time, int, 0);
 MODULE_PARM_DESC(pmdown_time, "DAPM stream powerdown time (msecs)");
+
+extern bool g_tabla_sw_prlling_flg;
 
 /* returns the minimum number of bytes needed to represent
  * a particular given value */
@@ -2046,6 +2050,14 @@ EXPORT_SYMBOL_GPL(snd_soc_read);
 unsigned int snd_soc_write(struct snd_soc_codec *codec,
 			   unsigned int reg, unsigned int val)
 {
+	if ((reg == TABLA_A_LDO_H_MODE_1)||(reg == TABLA_A_MICB_2_CTL)||
+		(reg == TABLA_A_MICB_CFILT_2_CTL)||(reg == TABLA_A_MICB_2_INT_RBIAS))
+	{
+		if ( g_tabla_sw_prlling_flg == true)
+		{
+			return(0);
+		}
+	}
 	dev_dbg(codec->dev, "write %x = %x\n", reg, val);
 	trace_snd_soc_reg_write(codec, reg, val);
 	return codec->write(codec, reg, val);

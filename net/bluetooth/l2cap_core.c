@@ -5445,6 +5445,9 @@ static void l2cap_logical_link_complete(struct hci_chan *chan, u8 status)
 
 	BT_DBG("sk %p", sk);
 
+	if (!sk)
+		return;
+
 	lock_sock(sk);
 
 	if (sk->sk_state != BT_CONNECTED && !l2cap_pi(sk)->amp_id) {

@@ -31,6 +31,11 @@
 #include <linux/delay.h>
 #include <linux/mutex.h>
 #include <linux/rtc.h>
+#include <linux/fs.h>
+#include <linux/string.h>
+#include <linux/uaccess.h>
+#include <linux/reboot.h>
+#include <pm8921-charger_oem.h>
 
 #define BMS_CONTROL		0x224
 #define BMS_S1_DELAY		0x225
@@ -164,6 +169,12 @@ struct pm8921_bms_chip {
 
 	int			shutdown_soc;
 	int			shutdown_iavg_ua;
+	struct rbatt_lut	*rbatt_initial_lut;
+	struct soc_adjust_lut	*soc_adjust_lut;
+	struct single_row_lut	*cycle_adjust_lut;
+	int			timer_uuc_expired;
+	struct delayed_work	uuc_timer_work;
+	int			uuc_uah_iavg_prev;
 	struct delayed_work	calculate_soc_delayed_work;
 	struct timespec		t_soc_queried;
 	unsigned long		last_recalc_time;
@@ -217,6 +228,19 @@ static struct pm8921_bms_chip *the_chip;
 #define MAX_FCC_LEARNING_COUNT			5
 #define VALID_FCC_CHGCYL_RANGE			50
 
+#define PERCENT_OF_SOC_REPLACE		50
+#define LOW_BATT_DETECTION_OFF		0
+#define LOW_BATT_DETECTION_ON		1
+
+enum batt_deterioration_type {
+	BATT_DETERIORATION_GOOD,
+	BATT_DETERIORATION_NORMAL,
+	BATT_DETERIORATION_DEAD,
+};
+
+static int batt_deterioration_status = INT_MIN;
+module_param(batt_deterioration_status, int, 0644);
+
 static int last_usb_cal_delta_uv = 1800;
 module_param(last_usb_cal_delta_uv, int, 0644);
 
@@ -234,12 +258,14 @@ static int last_real_fcc_mah = -EINVAL;
 static int last_real_fcc_batt_temp = -EINVAL;
 static int battery_removed;
 
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 static int pm8921_battery_gauge_alarm_notify(struct notifier_block *nb,
 				unsigned long status, void *unused);
 
 static struct notifier_block alarm_notifier = {
 	.notifier_call = pm8921_battery_gauge_alarm_notify,
 };
+#endif
 
 static int bms_ro_ops_set(const char *val, const struct kernel_param *kp)
 {
@@ -282,6 +308,13 @@ module_param_cb(bms_start_cc_uah, &bms_ro_param_ops, &bms_start_cc_uah, 0644);
 module_param_cb(bms_end_percent, &bms_ro_param_ops, &bms_end_percent, 0644);
 module_param_cb(bms_end_ocv_uv, &bms_ro_param_ops, &bms_end_ocv_uv, 0644);
 module_param_cb(bms_end_cc_uah, &bms_ro_param_ops, &bms_end_cc_uah, 0644);
+
+static int current_soc = -EINVAL;
+static int last_time_soc = -EINVAL;
+static int current_soc_ui = -EINVAL;
+static int last_time_soc_ui = -EINVAL;
+static int current_temp_state =  -EINVAL;
+static int last_time_temp_state =  -EINVAL;
 
 static void readjust_fcc_table(void)
 {
@@ -445,6 +478,7 @@ static void pm8921_bms_low_voltage_config(struct pm8921_bms_chip *chip,
 						msecs_to_jiffies(ms));
 }
 
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 static int pm8921_bms_enable_batt_alarm(struct pm8921_bms_chip *chip)
 {
 	int rc = 0;
@@ -565,7 +599,7 @@ static int pm8921_battery_gauge_alarm_notify(struct notifier_block *nb,
 
 	return 0;
 };
-
+#endif
 
 #define HOLD_OREG_DATA		BIT(1)
 static int pm_bms_lock_output_data(struct pm8921_bms_chip *chip)
@@ -690,12 +724,29 @@ static int adjust_xo_vbatt_reading(struct pm8921_bms_chip *chip,
 						* VBATT_MUL_FACTOR;
 }
 
-#define CC_RESOLUTION_N		868056
-#define CC_RESOLUTION_D		10000
+#define CC_RESOLUTION_N_V1	1085069
+#define CC_RESOLUTION_D_V1	100000
+#define CC_RESOLUTION_N_V2	868056
+#define CC_RESOLUTION_D_V2	10000
+static s64 cc_to_microvolt_v1(s64 cc)
+{
+	return div_s64(cc * CC_RESOLUTION_N_V1, CC_RESOLUTION_D_V1);
+}
+
+static s64 cc_to_microvolt_v2(s64 cc)
+{
+	return div_s64(cc * CC_RESOLUTION_N_V2, CC_RESOLUTION_D_V2);
+}
 
 static s64 cc_to_microvolt(struct pm8921_bms_chip *chip, s64 cc)
 {
-	return div_s64(cc * CC_RESOLUTION_N, CC_RESOLUTION_D);
+	/*
+	 * resolution (the value of a single bit) was changed after revision 2.0
+	 * for more accurate readings
+	 */
+	return (chip->revision < PM8XXX_REVISION_8921_2p0) ?
+				cc_to_microvolt_v1((s64)cc) :
+				cc_to_microvolt_v2((s64)cc);
 }
 
 #define CC_READING_TICKS	56
@@ -1109,6 +1160,22 @@ static int read_soc_params_raw(struct pm8921_bms_chip *chip,
 	pr_debug("cc_raw= 0x%x\n", raw->cc);
 	return 0;
 }
+
+#if 0
+static void oem_read_soc_params_raw(struct pm8921_bms_chip *chip,
+				struct pm8921_soc_params *raw)
+{
+	mutex_lock(&chip->bms_output_lock);
+	pm_bms_lock_output_data(chip);
+
+	read_cc(chip, &raw->cc);
+
+	pm_bms_unlock_output_data(chip);
+	mutex_unlock(&chip->bms_output_lock);
+
+	raw->last_good_ocv_uv = chip->last_ocv_uv;
+}
+#endif
 
 static int get_rbatt(struct pm8921_bms_chip *chip, int soc_rbatt, int batt_temp)
 {
@@ -1582,6 +1649,375 @@ static void calculate_soc_params(struct pm8921_bms_chip *chip,
 	pr_debug("UUC = %uuAh\n", *unusable_charge_uah);
 }
 
+#define BAT_TEMP_ELEMENT_COUNT 5
+static int oem_get_batt_temp(struct pm8921_bms_chip *chip, int *batt_temp)
+{
+	int rc = 0;
+	int work[5] = {0};
+	int max = 0;
+	int min = 0;
+	int total = 0;
+	int cnt = 0;
+	struct pm8xxx_adc_chan_result result;
+
+	for (cnt = 0; cnt < BAT_TEMP_ELEMENT_COUNT; cnt++) {
+		rc = pm8xxx_adc_read(chip->batt_temp_channel, &result);
+		if (rc) {
+			pr_debug("error reading adc channel = %d, rc = %d\n",
+					chip->batt_temp_channel, rc);
+			return rc;
+		}
+		work[cnt] = (int)result.physical;
+
+		if (0 == cnt) {
+			max = work[0];
+			min = work[0];
+		} else {
+			if (max < work[cnt]) {
+				max = work[cnt];
+			}
+			if (min > work[cnt]) {
+				min = work[cnt];
+			}
+		}
+
+		total += work[cnt];
+	}
+
+	*batt_temp = (total - max - min) / (BAT_TEMP_ELEMENT_COUNT - 2);
+
+	pr_debug("batt_temp total = %d max = %d min = %d \n", total, max, min);
+	pr_debug("batt_temp = %d   %d %d %d %d %d \n", 
+		*batt_temp,
+		work[0],
+		work[1],
+		work[2],
+		work[3],
+		work[4]);
+
+	return 0;
+}
+
+#if 0
+static int oem_interpolate_rbatt(struct rbatt_lut *rbatt_lut,
+					int vbatt, int batt_temp)
+{
+	int i, rbatt_row1, rbatt_row2, rbatt;
+	int rows, cols;
+	int row1 = 0;
+	int row2 = 0;
+
+	vbatt = vbatt / 1000;
+	batt_temp = batt_temp / 10;
+	rows = rbatt_lut->rows;
+	cols = rbatt_lut->cols;
+
+	if (vbatt > rbatt_lut->vbatt[0]) {
+		vbatt = rbatt_lut->vbatt[0];
+		row1 = 0;
+		row2 = 0;
+	}
+	if (vbatt < rbatt_lut->vbatt[rows - 1]) {
+		vbatt = rbatt_lut->vbatt[rows - 1];
+		row1 = rows - 1;
+		row2 = rows - 1;
+	}
+	for (i = 0; i < rows; i++) {
+		if (vbatt == rbatt_lut->vbatt[i]) {
+			row1 = i;
+			row2 = i;
+			break;
+		}
+		if (vbatt > rbatt_lut->vbatt[i]) {
+			row1 = i - 1;
+			row2 = i;
+			break;
+		}
+	}
+
+	if (batt_temp < rbatt_lut->temp[0])
+		batt_temp = rbatt_lut->temp[0];
+	if (batt_temp > rbatt_lut->temp[cols - 1])
+		batt_temp = rbatt_lut->temp[cols - 1];
+
+	for (i = 0; i < cols; i++)
+		if (batt_temp <= rbatt_lut->temp[i])
+			break;
+
+	if (batt_temp == rbatt_lut->temp[i]) {
+		rbatt = linear_interpolate(
+				rbatt_lut->rbatt[row1][i],
+				rbatt_lut->vbatt[row1],
+				rbatt_lut->rbatt[row2][i],
+				rbatt_lut->vbatt[row2],
+				vbatt);
+		return rbatt;
+	}
+
+	rbatt_row1 = linear_interpolate(
+				rbatt_lut->rbatt[row1][i - 1],
+				rbatt_lut->temp[i - 1],
+				rbatt_lut->rbatt[row1][i],
+				rbatt_lut->temp[i],
+				batt_temp);
+
+	rbatt_row2 = linear_interpolate(
+				rbatt_lut->rbatt[row2][i - 1],
+				rbatt_lut->temp[i - 1],
+				rbatt_lut->rbatt[row2][i],
+				rbatt_lut->temp[i],
+				batt_temp);
+
+	rbatt      = linear_interpolate(
+				rbatt_row1,
+				rbatt_lut->vbatt[row1],
+				rbatt_row2,
+				rbatt_lut->vbatt[row2],
+				vbatt);
+
+	return rbatt;
+}
+#endif
+
+static int oem_linear_interpolate(int z0, int z1, int z2, int z3,
+				int x0, int x1, int y0, int y1, int x, int y,
+				int cols_equal, int rows_equal)
+{
+	int mid0 = 0, mid1 = 0, mid2 = 0, mid3 = 0, mid4 = 0, mid5 = 0;
+	int ans = 0;
+	const int coef = 8;
+
+	if ((!rows_equal) && (!cols_equal)) {
+		mid0 = ((z0 * (x1 - x)) << coef) / (x1 - x0);
+		mid1 = ((z1 * (x - x0)) << coef) / (x1 - x0);
+		mid2 = ((y1 - y) << coef) / (y1 - y0);
+		mid3 = ((z2 * (x1 - x)) << coef) / (x1 - x0);
+		mid4 = ((z3 * (x - x0)) << coef) / (x1 - x0);
+		mid5 = ((y - y0) << coef) / (y1 - y0);
+		ans = (((mid0 + mid1) * mid2) + ((mid3 + mid4) * mid5)) >> coef;
+	} else if ((rows_equal) && (!cols_equal)) {
+		mid0 = ((z0 * (x1 - x)) << coef) / (x1 - x0);
+		mid1 = ((z1 * (x - x0)) << coef) / (x1 - x0);
+		ans = (mid0 + mid1);
+	} else if ((!rows_equal) && (cols_equal)) {
+		mid0 = ((y1 - y) << coef) / (y1 - y0);
+		mid1 = ((y - y0) << coef) / (y1 - y0);
+		ans = (z0 * mid0) + (z2* mid1);
+	} else {
+		ans = z0 << coef;
+	}
+
+	return ans;
+}
+
+static int oem_linear_interpolate_1d(int x0, int x1,
+				int y0, int y1, int x,
+				int cols_equal)
+{
+	int mid0 = 0, mid1 = 0;
+	int ans = 0;
+
+	if (!cols_equal) {
+		mid0 = (y0 * (x1 - x)) / (x1 - x0);
+		mid1 = (y1 * (x - x0)) / (x1 - x0);
+		ans = (mid0 + mid1);
+	} else {
+		ans = y0;
+	}
+
+	return ans;
+}
+
+static int oem_interpolate_soc_adjust(struct soc_adjust_lut *adjust_lut,
+					int ibatt, int batt_temp)
+{
+	int rows = 0, cols = 0;
+	int rows_equal = 0, cols_equal = 0;
+	int row1 = 0, row2 = 0;
+	int col1 = 0, col2 = 0;
+	int soc_adjust = 0;
+	int cnt;
+
+	ibatt = ibatt / 1000;
+	batt_temp = batt_temp / 10;
+	rows = adjust_lut->rows;
+	cols = adjust_lut->cols;
+
+	if (ibatt > adjust_lut->ibatt[0]) {
+		ibatt = adjust_lut->ibatt[0];
+		rows_equal = 1;
+		row1 = 0;
+		row2 = 0;
+	}
+	if (ibatt < adjust_lut->ibatt[rows - 1]) {
+		ibatt = adjust_lut->ibatt[rows - 1];
+		rows_equal = 1;
+		row1 = rows - 1;
+		row2 = rows - 1;
+	}
+	for (cnt = 0; cnt < rows; cnt++) {
+		if (ibatt == adjust_lut->ibatt[cnt]) {
+			rows_equal = 1;
+			row1 = cnt;
+			row2 = cnt;
+			break;
+		}
+		if (ibatt > adjust_lut->ibatt[cnt]) {
+			row1 = cnt - 1;
+			row2 = cnt;
+			break;
+		}
+	}
+
+	if (batt_temp < adjust_lut->temp[0]) {
+		batt_temp = adjust_lut->temp[0];
+		cols_equal = 1;
+		col1 = 0;
+		col2 = 0;
+	}
+	if (batt_temp > adjust_lut->temp[cols - 1]) {
+		batt_temp = adjust_lut->temp[cols - 1];
+		cols_equal = 1;
+		col1 = cols - 1;
+		col2 = cols - 1;
+	}
+	for (cnt = 0; cnt < cols; cnt++) {
+		if (batt_temp == adjust_lut->temp[cnt]) {
+			cols_equal = 1;
+			col1 = cnt;
+			col2 = cnt;
+			break;
+		}
+		if (batt_temp < adjust_lut->temp[cnt]) {
+			col1 = cnt - 1;
+			col2 = cnt;
+			break;
+		}
+	}
+
+	soc_adjust = oem_linear_interpolate(
+		adjust_lut->soc_adjust[row1][col1],
+		adjust_lut->soc_adjust[row1][col2],
+		adjust_lut->soc_adjust[row2][col1],
+		adjust_lut->soc_adjust[row2][col2],
+		adjust_lut->temp[col1],
+		adjust_lut->temp[col2],
+		adjust_lut->ibatt[row1],
+		adjust_lut->ibatt[row2],
+		batt_temp, ibatt,
+		cols_equal, rows_equal);
+
+	return soc_adjust;
+}
+
+static int oem_interpolate_cycle_adjust(struct single_row_lut *cycle_adjust_lut,
+					int rbat)
+{
+	int cols = 0;
+	int cols_equal = 0;
+	int col1 = 0, col2 = 0;
+	int cycle = 0;
+	int cnt;
+
+	cols = cycle_adjust_lut->cols;
+
+	if (rbat < cycle_adjust_lut->x[0]) {
+		rbat = cycle_adjust_lut->x[0];
+		cols_equal = 1;
+		col1 = 0;
+		col2 = 0;
+	}
+	if (rbat > cycle_adjust_lut->x[cols - 1]) {
+		rbat = cycle_adjust_lut->x[cols - 1];
+		cols_equal = 1;
+		col1 = cols - 1;
+		col2 = cols - 1;
+	}
+	for (cnt = 0; cnt < cols; cnt++) {
+		if (rbat == cycle_adjust_lut->x[cnt]) {
+			cols_equal = 1;
+			col1 = cnt;
+			col2 = cnt;
+			break;
+		}
+		if (rbat < cycle_adjust_lut->x[cnt]) {
+			col1 = cnt - 1;
+			col2 = cnt;
+			break;
+		}
+	}
+
+	cycle = oem_linear_interpolate_1d(
+		cycle_adjust_lut->x[col1],
+		cycle_adjust_lut->x[col2],
+		cycle_adjust_lut->y[col1],
+		cycle_adjust_lut->y[col2],
+		rbat, cols_equal);
+
+	pr_debug("cycle adjust x0=%d x1=%d y0=%d y1=%d rbat=%d cols_equal=%d\n",
+		  cycle_adjust_lut->x[col1],
+		  cycle_adjust_lut->x[col2],
+		  cycle_adjust_lut->y[col1],
+		  cycle_adjust_lut->y[col2],
+		  rbat,
+		  cols_equal);
+
+	return cycle;
+}
+
+static void oem_calculate_ocv_initial(struct pm8921_bms_chip *chip)
+{
+#if 0
+	int16_t vsense_raw = 0;
+	int16_t vbatt_raw  = 0;
+	int vbatt_uv    = 0;
+	int ibatt_ua    = 0;
+	int batt_temp   = 0;
+	int rbatt_mohm  = 0;
+	int ocv_initial = 0;
+	int vsense_uv   = 0;
+	int usb_chg     = 0;
+
+	pm_bms_read_output_data(chip, VBATT_AVG, &vbatt_raw);
+	usb_chg = usb_chg_plugged_in(chip);
+	convert_vbatt_raw_to_uv(chip, usb_chg, vbatt_raw, &vbatt_uv);
+
+	pm_bms_read_output_data(chip, VSENSE_AVG, &vsense_raw);
+	convert_vsense_to_uv(chip, vsense_raw, &vsense_uv);
+	ibatt_ua = div_s64((s64)vsense_uv * 1000000LL, chip->r_sense_uohm);
+
+	oem_get_batt_temp(chip, &batt_temp);
+
+	rbatt_mohm = oem_interpolate_rbatt(chip->rbatt_initial_lut,
+						vbatt_uv, batt_temp);
+
+	ocv_initial = vbatt_uv + ((ibatt_ua * rbatt_mohm) / 1000);
+	if (chip->max_voltage_uv < ocv_initial) {
+		ocv_initial = chip->max_voltage_uv;
+	}
+
+	chip->last_ocv_uv = ocv_initial;
+#endif
+}
+
+static int oem_get_max_voltage_uv(struct pm8921_bms_chip *chip)
+{
+	int max_vol_uv = 0;
+	int vddmax_vol = 0;
+	
+	pm8921_get_chg_vddmax(&vddmax_vol);
+	pr_debug("vddmax_vol = %dmv\n", vddmax_vol);
+	
+	if (vddmax_vol == 0) {
+		max_vol_uv = chip->max_voltage_uv;
+	}
+	else {
+		max_vol_uv = vddmax_vol * 1000;
+	}
+	
+	return max_vol_uv;
+}
+
 int pm8921_bms_get_simultaneous_battery_voltage_and_current(int *ibat_ua,
 								int *vbat_uv)
 {
@@ -1747,14 +2183,25 @@ static int charging_adjustments(struct pm8921_bms_chip *chip,
 	int chg_soc;
 	int vbat_batt_terminal_uv = vbat_uv
 					+ (ibat_ua * chip->rconn_mohm) / 1000;
+	int max_vol_uv = 0;
+	
+	max_vol_uv = oem_get_max_voltage_uv(chip);
 
 	if (chip->soc_at_cv == -EINVAL) {
 		/* In constant current charging return the calc soc */
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 		if (vbat_batt_terminal_uv <= chip->max_voltage_uv)
+#else
+		if (vbat_batt_terminal_uv <= max_vol_uv)
+#endif
 			pr_debug("CC CHG SOC %d\n", soc);
 
 		/* Note the CC to CV point */
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 		if (vbat_batt_terminal_uv >= chip->max_voltage_uv) {
+#else
+		if (vbat_batt_terminal_uv >= max_vol_uv) {
+#endif
 			chip->soc_at_cv = soc;
 			chip->prev_chg_soc = soc;
 			chip->ibat_at_cv_ua = ibat_ua;
@@ -1814,7 +2261,9 @@ static int charging_adjustments(struct pm8921_bms_chip *chip,
 static void very_low_voltage_check(struct pm8921_bms_chip *chip,
 					int ibat_ua, int vbat_uv)
 {
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	int rc;
+#endif
 	/*
 	 * if battery is very low (v_cutoff voltage + 20mv) hold
 	 * a wakelock untill soc = 0%
@@ -1831,9 +2280,11 @@ static void very_low_voltage_check(struct pm8921_bms_chip *chip,
 		pr_debug("voltage = %d releasing wakelock\n", vbat_uv);
 		chip->vbatt_cutoff_count = 0;
 		chip->soc_calc_period = chip->normal_voltage_calc_ms;
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 		rc = pm8921_bms_enable_batt_alarm(chip);
 		if (rc)
 			pr_err("Unable to enable batt alarm\n");
+#endif
 		wake_unlock(&chip->low_voltage_wake_lock);
 	}
 }
@@ -2263,6 +2714,7 @@ static int calculate_state_of_charge(struct pm8921_bms_chip *chip,
 {
 	int remaining_usable_charge_uah, fcc_uah, unusable_charge_uah;
 	int remaining_charge_uah, soc;
+	int update_userspace = 1;
 	int cc_uah;
 	int rbatt;
 	int iavg_ua;
@@ -2344,6 +2796,7 @@ static int calculate_state_of_charge(struct pm8921_bms_chip *chip,
 				"fcc = %d soc =%d\n",
 				chip->last_ocv_uv, chargecycles, batt_temp,
 				fcc_uah, soc);
+		update_userspace = 0;
 		soc = 0;
 	}
 
@@ -2530,8 +2983,10 @@ static int report_state_of_charge(struct pm8921_bms_chip *chip)
 	}
 
 	last_soc = bound_soc(soc);
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	backup_soc_and_iavg(chip, batt_temp, last_soc);
 	pr_debug("Reported SOC = %d\n", last_soc);
+#endif
 	chip->t_soc_queried = now;
 
 	return last_soc;
@@ -2702,14 +3157,517 @@ error_vsense:
 }
 EXPORT_SYMBOL(pm8921_bms_get_battery_current);
 
-int pm8921_bms_get_percent_charge(void)
+static struct pm8921_bms_correction pm8921_bms_correction_data[] = {
+	{CHG_STATE_NONCONNECTED   , CHG_MODE_DISCHARGE, CHG_CONDITION_NULL       , CHG_CONDITION_NULL       },
+	{CHG_STATE_IDLE           , CHG_MODE_DISCHARGE, CHG_CONDITION_NULL       , CHG_CONDITION_NULL       },
+	{CHG_STATE_TRICKLE        , CHG_MODE_CHARGING , CHG_CONDITION_4340MV     , CHG_CONDITION_4240MV     },
+	{CHG_STATE_FAST_COOL      , CHG_MODE_CHARGING , CHG_CONDITION_4340MV     , CHG_CONDITION_4240MV     },
+	{CHG_STATE_FAST_NORMAL    , CHG_MODE_CHARGING , CHG_CONDITION_4340MV     , CHG_CONDITION_4240MV     },
+	{CHG_STATE_FAST_WARM      , CHG_MODE_CHARGING , CHG_CONDITION_4240MV     , CHG_CONDITION_4240MV     },
+	{CHG_STATE_INTE_COOL      , CHG_MODE_CHARGING , CHG_CONDITION_4340MV_INTE, CHG_CONDITION_4240MV_INTE},
+	{CHG_STATE_INTE_NORMAL    , CHG_MODE_CHARGING , CHG_CONDITION_4340MV_INTE, CHG_CONDITION_4240MV_INTE},
+	{CHG_STATE_INTE_WARM      , CHG_MODE_CHARGING , CHG_CONDITION_4240MV_INTE, CHG_CONDITION_4240MV_INTE},
+	{CHG_STATE_CHG_COMP       , CHG_MODE_FULL     , CHG_CONDITION_NULL       , CHG_CONDITION_NULL       },
+	{CHG_STATE_CHG_TIMEOUT    , CHG_MODE_DISCHARGE, CHG_CONDITION_NULL       , CHG_CONDITION_NULL       },
+	{CHG_STATE_CHG_STAND      , CHG_MODE_CHARGING , CHG_CONDITION_4340MV     , CHG_CONDITION_4240MV     },
+	{CHG_STATE_BATT_TEMP_COLD , CHG_MODE_DISCHARGE, CHG_CONDITION_NULL       , CHG_CONDITION_NULL       },
+	{CHG_STATE_BATT_TEMP_HOT  , CHG_MODE_DISCHARGE, CHG_CONDITION_NULL       , CHG_CONDITION_NULL       },
+	{CHG_STATE_WAIT_TEMP      , CHG_MODE_DISCHARGE, CHG_CONDITION_NULL       , CHG_CONDITION_NULL       },
+	{CHG_STATE_BATT_ID_ERROR  , CHG_MODE_DISCHARGE, CHG_CONDITION_NULL       , CHG_CONDITION_NULL       },
+	{CHG_STATE_CHG_ERROR      , CHG_MODE_DISCHARGE, CHG_CONDITION_NULL       , CHG_CONDITION_NULL       },
+};
+
+#define SOC_SHIFT              (8)
+#define SOC_PERCENT_FULL_NEAR  (99  << SOC_SHIFT)
+#define SOC_PERCENT_FULL       (100 << SOC_SHIFT)
+#define SOC_CHARGE_4340MV      (100 << SOC_SHIFT)
+#define SOC_CHARGE_4240MV      (76  << SOC_SHIFT)
+#define SOC_CHARGE_4340MV_INTE (100  << SOC_SHIFT)
+#define SOC_CHARGE_4240MV_INTE (76  << SOC_SHIFT)
+#define SOC_THRESHOLD_HI       (70  << SOC_SHIFT)
+#define SOC_THRESHOLD_LO       (2 << SOC_SHIFT)
+#define SOC_ROUND_THRESHOLD    (1 << (SOC_SHIFT - 1))
+#define SOC_IGNORE_LOWBATT_THRESHOLD (10 << SOC_SHIFT)
+
+static int low_batt_detection         = LOW_BATT_DETECTION_OFF;
+static int last_time_correction_mode  = CHG_MODE_DISCHARGE;
+static int pm8921_bms_chg_condition[] = {SOC_CHARGE_4340MV, SOC_CHARGE_4240MV,
+						SOC_CHARGE_4340MV_INTE, SOC_CHARGE_4240MV_INTE};
+
+static int oem_pm8921_bms_correct_soc(int chg_state, int in_soc, int uim_valid)
 {
+	int soc_correction = 0;
+	int calc_soc = 0;
+	int ibatt_ua = 0;
+	int batt_temp = 0;
+	int soc_adjust = 0;
+	int chg_condition = 0;
+	int result_soc_ui = (current_soc_ui + SOC_ROUND_THRESHOLD) >> SOC_SHIFT;
+
+	if (in_soc == 0) {
+		return result_soc_ui;
+	} else {
+		current_soc = in_soc << SOC_SHIFT;
+	}
+
+	if (chg_state >= CHG_STATE_MAX) {
+		pr_err("error chg_state = %d\n", chg_state);
+		return result_soc_ui;
+	}
+
+	if (chg_state == CHG_STATE_INIT) {
+		if (current_soc > SOC_PERCENT_FULL) {
+			current_soc_ui = SOC_PERCENT_FULL;
+		} else if (current_soc < SOC_THRESHOLD_LO) {
+			current_soc_ui = SOC_THRESHOLD_LO;
+		} else {
+			current_soc_ui = current_soc;
+		}
+		last_time_soc_ui = current_soc_ui;
+		last_time_soc = current_soc;
+		result_soc_ui = (current_soc_ui + SOC_ROUND_THRESHOLD) >> SOC_SHIFT;
+		return result_soc_ui;
+	}
+
+	if (uim_valid) {
+		chg_condition = pm8921_bms_correction_data[chg_state].chg_condition_uim_valid;
+	} else {
+		chg_condition = pm8921_bms_correction_data[chg_state].chg_condition_uim_invalid;
+	}
+
+	if (chg_condition < CHG_CONDITION_MAX) {
+		if ((pm8921_bms_correction_data[chg_state].chg_mode == CHG_MODE_CHARGING) &&
+			(current_soc >= pm8921_bms_chg_condition[chg_condition])) {
+			current_soc_ui = SOC_PERCENT_FULL_NEAR;
+			last_time_soc_ui = current_soc_ui;
+			last_time_soc = current_soc;
+			result_soc_ui = (current_soc_ui + SOC_ROUND_THRESHOLD) >> SOC_SHIFT;
+			last_time_correction_mode = pm8921_bms_correction_data[chg_state].chg_mode;
+			return result_soc_ui;
+		}
+	}
+	
+	if (((last_time_correction_mode == CHG_MODE_DISCHARGE) ||
+	     (last_time_correction_mode == CHG_MODE_FULL)) &&
+	    (pm8921_bms_correction_data[chg_state].chg_mode == CHG_MODE_CHARGING)) {
+		low_batt_detection = LOW_BATT_DETECTION_OFF;
+	}
+
+	if (low_batt_detection != LOW_BATT_DETECTION_ON) {
+		if (last_time_soc < current_soc) {
+			if (pm8921_bms_correction_data[chg_state].chg_mode != CHG_MODE_CHARGING) {
+			} else if (chg_condition < CHG_CONDITION_MAX) {
+				soc_correction = pm8921_bms_chg_condition[chg_condition];
+				if (soc_correction != last_time_soc) {
+					calc_soc = ((SOC_PERCENT_FULL_NEAR - last_time_soc_ui) *
+							 (current_soc - last_time_soc)) /
+							 (soc_correction - last_time_soc) + last_time_soc_ui;
+				} else {
+					calc_soc = last_time_soc_ui;
+				}
+				current_soc_ui = (calc_soc > SOC_PERCENT_FULL_NEAR) ? SOC_PERCENT_FULL_NEAR : calc_soc;
+				last_time_soc_ui = current_soc_ui;
+				last_time_soc = current_soc;
+			}
+		} else if(last_time_soc > current_soc) {
+			if ((pm8921_bms_correction_data[chg_state].chg_mode == CHG_MODE_FULL) &&
+				(current_soc >= SOC_THRESHOLD_HI)) {
+				last_time_soc = current_soc;
+			} else {
+				if (last_time_soc_ui >= SOC_THRESHOLD_LO) {
+					pm8921_bms_get_battery_current(&ibatt_ua);
+					oem_get_batt_temp(the_chip, &batt_temp);
+					soc_adjust = oem_interpolate_soc_adjust(
+							the_chip->soc_adjust_lut, ibatt_ua, batt_temp);
+					if (last_time_soc != soc_adjust) {
+						calc_soc = ((current_soc - soc_adjust) * last_time_soc_ui) /
+										(last_time_soc - soc_adjust);
+					} else {
+						calc_soc = 0;
+					}
+					current_soc_ui = (calc_soc < SOC_THRESHOLD_LO) ? SOC_THRESHOLD_LO : calc_soc;
+					last_time_soc_ui = current_soc_ui;
+					last_time_soc = current_soc;
+				}
+			}
+		}
+	}
+
+	if ((last_time_correction_mode == CHG_MODE_DISCHARGE) &&
+	    (pm8921_bms_correction_data[chg_state].chg_mode == CHG_MODE_CHARGING) &&
+	    (current_soc_ui == SOC_PERCENT_FULL)) {
+		last_time_soc_ui = SOC_PERCENT_FULL_NEAR;
+		current_soc_ui   = SOC_PERCENT_FULL_NEAR;
+	}
+	if ((last_time_correction_mode == CHG_MODE_FULL) &&
+	   (pm8921_bms_correction_data[chg_state].chg_mode == CHG_MODE_CHARGING) &&
+	   (current_soc_ui == SOC_PERCENT_FULL)) {
+		last_time_soc_ui = SOC_PERCENT_FULL_NEAR;
+		current_soc_ui   = SOC_PERCENT_FULL_NEAR;
+	}
+	if (((last_time_correction_mode == CHG_MODE_CHARGING)  ||
+	     (last_time_correction_mode == CHG_MODE_DISCHARGE) ||
+	     (last_time_correction_mode == CHG_MODE_FULL)) &&
+	    (pm8921_bms_correction_data[chg_state].chg_mode == CHG_MODE_FULL)) {
+		last_time_soc_ui = SOC_PERCENT_FULL;
+		current_soc_ui   = SOC_PERCENT_FULL;
+	}
+
+	last_time_correction_mode = pm8921_bms_correction_data[chg_state].chg_mode;
+
+	if ((current_soc_ui > SOC_PERCENT_FULL) ||
+			(current_soc_ui < 0)) {
+		pr_debug("calc soc error %d\n", current_soc_ui);
+		current_soc_ui = result_soc_ui << SOC_SHIFT;
+		last_time_soc_ui = current_soc_ui;
+	}
+
+	result_soc_ui = (current_soc_ui + SOC_ROUND_THRESHOLD) >> SOC_SHIFT;
+
+	return result_soc_ui;
+}
+
+#define BMS_CYCLECORRECT_J1_UV		4100000
+#define BMS_CYCLECORRECT_J2_UV		4200000
+#define BMS_CYCLECORRECT_JCAL_UA	500000
+#define BMS_CYCLECORRECT_JCAL_BAT_LO	100
+#define BMS_CYCLECORRECT_JCAL_BAT_HI	400
+
+int oem_bms_last_batt_status;
+int oem_bms_last_charge_type;
+int oem_bms_last_dc_present;
+int oem_bms_last_usb_present;
+static atomic_t oem_bms_cyclecorrect_state=ATOMIC_INIT(CHG_CYCLECORRECT_STATE_CHARGER_NO);
+static int cycle_vbat1,cycle_ibat1;
+static int cycle_vbat2,cycle_ibat2;
+static int cycle_tbat;
+static int est_charge_cycles;
+static int cyclecorrection_req = 0;
+static int cyclecorrection_count = 0;
+static struct wake_lock oem_bms_cyclecorrection_wake_lock;
+
+extern unsigned int oem_chg_is_dc_present(void);
+extern unsigned int oem_chg_is_usb_present(void);
+extern int oem_chg_get_oem_stand_detect(void);
+extern int oem_chg_get_charge_state(void);
+extern int oem_pm8921_disable_source_current(bool disable);
+extern int oem_chg_get_prop_batt_status(void);
+extern int oem_chg_get_prop_charge_type(void);
+
+static void oem_pm8921_bms_init_cyclecorrection(void)
+{
+
+	atomic_set(&oem_bms_cyclecorrect_state, CHG_CYCLECORRECT_STATE_CHARGER_NO);
+	wake_lock_init(&oem_bms_cyclecorrection_wake_lock, WAKE_LOCK_SUSPEND, "oem_bms_cyclecorrection");
+	cyclecorrection_count = 0;
+}
+
+static void oem_pm8921_bms_get_parameter(int *vbatt_uv, int *ibatt_ua, int *batt_temp)
+{
+	int16_t vsense_raw = 0;
+	int16_t vbatt_raw  = 0;
+	int vsense_uv      = 0;
+	int usb_chg        = 0;
+
+	pm_bms_read_output_data(the_chip, VBATT_AVG, &vbatt_raw);
+	usb_chg = usb_chg_plugged_in(the_chip);
+	convert_vbatt_raw_to_uv(the_chip, usb_chg, vbatt_raw, vbatt_uv);
+
+	pm_bms_read_output_data(the_chip, VSENSE_AVG, &vsense_raw);
+	convert_vsense_to_uv(the_chip, vsense_raw, &vsense_uv);
+	*ibatt_ua = div_s64(vsense_uv * 1000000LL, the_chip->r_sense_uohm);
+
+	oem_get_batt_temp(the_chip, batt_temp);
+}
+
+static void oem_pm8921_bms_get_vbatt(int *vbatt_uv)
+{
+	int16_t vbatt_raw = 0;
+	int usb_chg       = 0;
+
+	pm_bms_read_output_data(the_chip, VBATT_AVG, &vbatt_raw);
+	usb_chg = usb_chg_plugged_in(the_chip);
+	convert_vbatt_raw_to_uv(the_chip, usb_chg, vbatt_raw, vbatt_uv);
+}
+
+void oem_pm8921_bms_calculate_cyclecorrection(void)
+{
+
+	bool cont_flag   = false;
+	int vbat         = 0;
+	int ibat         = 0;
+	int rtemp        = 0;
+	int rbat         = 0;
+	int rbat_sf      = 0;
+	int state        = CHG_CYCLECORRECT_STATE_CHARGER_NO;
+	int charge_state = CHG_STATE_NONCONNECTED;
+
+	if (!oem_chg_is_dc_present() && !oem_chg_is_usb_present() && !oem_chg_get_oem_stand_detect()) {
+		state = atomic_read(&oem_bms_cyclecorrect_state);
+		pr_debug("oem_bms_cyclecorrect_state=%d\n", state);
+		pr_debug("cyclecorrection_count=%d\n", cyclecorrection_count);
+
+		atomic_set(&oem_bms_cyclecorrect_state, CHG_CYCLECORRECT_STATE_CHARGER_NO);
+
+		if (state == CHG_CYCLECORRECT_STATE_PARAM_OBTAINED1){
+			pr_debug("charger removed state:CHG_CYCLECORRECT_STATE_PARAM_OBTAINED1\n");
+
+			oem_pm8921_disable_source_current(0);
+
+			wake_unlock(&oem_bms_cyclecorrection_wake_lock);
+		}
+		return;
+	}
+
+	do {
+		pr_debug("bms cont_flag=%d\n", cont_flag);
+
+		state = atomic_read(&oem_bms_cyclecorrect_state);
+		cont_flag = false;
+
+		pr_debug("oem_bms_cyclecorrect_state=%d\n", state);
+
+		switch (state){
+		case CHG_CYCLECORRECT_STATE_CHARGER_NO:
+			if (oem_chg_is_dc_present() || oem_chg_is_usb_present() || oem_chg_get_oem_stand_detect()) {
+				atomic_set(&oem_bms_cyclecorrect_state, CHG_CYCLECORRECT_STATE_CHARGER_DETECTED);
+				cont_flag = true;
+			}
+			break;
+
+		case CHG_CYCLECORRECT_STATE_CHARGER_DETECTED:
+			charge_state = oem_chg_get_charge_state();
+			if ((charge_state != CHG_STATE_FAST_COOL) &&
+			   (charge_state != CHG_STATE_FAST_NORMAL)){
+				pr_debug("bms charge_state not matched1.\n");
+				break;
+			}
+
+			oem_pm8921_bms_get_vbatt(&vbat);
+			pr_debug("bms J1 vbat:%d.\n", vbat);
+
+			if (vbat >= BMS_CYCLECORRECT_J1_UV){
+				pr_debug("not matched.\n");
+				break;
+			}
+
+			atomic_set(&oem_bms_cyclecorrect_state, CHG_CYCLECORRECT_STATE_OK1);
+			break;
+
+		case CHG_CYCLECORRECT_STATE_OK1:
+			charge_state = oem_chg_get_charge_state();
+			if ((charge_state != CHG_STATE_FAST_COOL) &&
+			   (charge_state != CHG_STATE_FAST_NORMAL)){
+				pr_debug("bms charge_state not matched2.\n");
+				break;
+			}
+
+			oem_pm8921_bms_get_vbatt(&vbat);
+			pr_debug("bms J2 vbat:%d.\n", vbat);
+
+			if (vbat < BMS_CYCLECORRECT_J2_UV){
+				pr_debug("not matched.\n");
+				break;
+			}
+
+			atomic_set(&oem_bms_cyclecorrect_state, CHG_CYCLECORRECT_STATE_OK2);
+			cont_flag = true;
+			break;
+
+		case CHG_CYCLECORRECT_STATE_OK2:
+			oem_pm8921_bms_get_parameter(&cycle_vbat1, &cycle_ibat1, &cycle_tbat);
+			pr_debug("bms cycle_vbat1:%d, cycle_ibat1:%d\n", cycle_vbat1, cycle_ibat1);
+
+			oem_bms_last_batt_status = oem_chg_get_prop_batt_status();
+			oem_bms_last_charge_type = oem_chg_get_prop_charge_type();
+			oem_bms_last_dc_present = oem_chg_is_dc_present();
+			oem_bms_last_usb_present = oem_chg_is_usb_present();
+
+			wake_lock(&oem_bms_cyclecorrection_wake_lock);
+
+			atomic_set(&oem_bms_cyclecorrect_state, CHG_CYCLECORRECT_STATE_PARAM_OBTAINED1);
+
+			oem_pm8921_disable_source_current(1);
+
+			break;
+
+		case CHG_CYCLECORRECT_STATE_PARAM_OBTAINED1:
+			oem_pm8921_bms_get_parameter(&cycle_vbat2, &cycle_ibat2, &cycle_tbat);
+			pr_debug("bms cycle_vbat2:%d, cycle_ibat2:%d, cycle_tbat:%d\n", cycle_vbat2, cycle_ibat2, cycle_tbat);
+
+			atomic_set(&oem_bms_cyclecorrect_state, CHG_CYCLECORRECT_STATE_PARAM_OBTAINED2);
+
+			oem_pm8921_disable_source_current(0);
+
+			cont_flag = true;
+
+			wake_unlock(&oem_bms_cyclecorrection_wake_lock);
+			break;
+
+		case CHG_CYCLECORRECT_STATE_PARAM_OBTAINED2:
+			ibat = abs(cycle_ibat1 - cycle_ibat2);
+			pr_debug("bms cycle correction. Ibat1=%d Ibat2=%d ibat=%d, tbat=%d \n", cycle_ibat1, cycle_ibat2, ibat, cycle_tbat);
+
+			if (ibat < BMS_CYCLECORRECT_JCAL_UA){
+				pr_debug("bms cycle correction. Ibat is not matched.\n");
+				atomic_set(&oem_bms_cyclecorrect_state, CHG_CYCLECORRECT_STATE_CALCULATED);
+				break;
+			}
+
+			if ((cycle_tbat <= BMS_CYCLECORRECT_JCAL_BAT_LO ) ||
+			   (BMS_CYCLECORRECT_JCAL_BAT_HI <= cycle_tbat))
+			{
+				pr_debug("bms cycle correction. Tbat is not matched.\n");
+				atomic_set(&oem_bms_cyclecorrect_state, CHG_CYCLECORRECT_STATE_CALCULATED);
+				break;
+			}
+
+			rtemp = abs(((cycle_vbat1 - cycle_vbat2) * 1000) / (cycle_ibat1 - cycle_ibat2));
+
+			rbat_sf = interpolate_scalingfactor(the_chip->rbatt_sf_lut,
+							cycle_tbat / 10,
+							current_soc >> SOC_SHIFT);
+			rbat = rtemp * 100 / rbat_sf;
+
+			est_charge_cycles = oem_interpolate_cycle_adjust(the_chip->cycle_adjust_lut, rbat);
+
+			pr_debug("rtemp=%d rbat_sf=%d rbat=%d est=%d\n", rtemp, rbat_sf, rbat, est_charge_cycles);
+
+			atomic_set(&oem_bms_cyclecorrect_state, CHG_CYCLECORRECT_STATE_CALCULATED);
+			cyclecorrection_req = 1;
+
+			break;
+
+		case CHG_CYCLECORRECT_STATE_CALCULATED:
+			pr_debug("Nothing to do. cycle correctin req:%d\n", cyclecorrection_req);
+
+			break;
+
+		default:
+			pr_err("Illegal oem_bms_cyclecorrect_state:%d\n", state);
+			break;
+
+		}
+
+	}while(cont_flag);
+
+}
+
+static void oem_pm8921_bms_correct_last_chargecycles(int* correction_cycles)
+{
+
+	int state;
+
+	state = atomic_read(&oem_bms_cyclecorrect_state);
+	if (cyclecorrection_req == 0){
+		pr_debug("No cycle correction data. state %d\n", state);
+		return;
+	}
+
+	pr_debug("cyclecorrection_count=%d.\n", cyclecorrection_count);
+	pr_debug("before correction_cycles=%d.\n", *correction_cycles);
+	if (cyclecorrection_count <= 16){
+		*correction_cycles = (*correction_cycles * 7 + est_charge_cycles) >> 3;
+	}else{
+		*correction_cycles = (*correction_cycles * 15 + est_charge_cycles) >> 4;
+	}
+
+	pr_debug("after correction_cycles=%d.\n", *correction_cycles);
+
+	if (cyclecorrection_count != UINT_MAX){
+		cyclecorrection_count++;
+	}
+
+	return;
+}
+
+bool oem_pm8921_bms_is_cyclecorrection_chargeoffstate(void)
+{
+	int state;
+
+	state = atomic_read(&oem_bms_cyclecorrect_state);
+	if (state == CHG_CYCLECORRECT_STATE_PARAM_OBTAINED1){
+		return true;
+	}else{
+		return false;
+	}
+}
+
+#ifdef QUALCOMM_ORIGINAL_FEATURE
+int pm8921_bms_get_percent_charge(void)
+#else
+int pm8921_bms_get_percent_charge(int chg_state, int uim_valid)
+#endif
+{
+#ifdef QUALCOMM_ORIGINAL_FEATURE
+	if (!the_chip) {
+		pr_err("called before initialization\n");
+		return -EINVAL;
+	}
+	return report_state_of_charge(the_chip);
+#else
+#if 0
+	int batt_temp, rc;
+	struct pm8xxx_adc_chan_result result;
+	struct pm8921_soc_params raw;
+#endif
+	int soc;
+	int soc_ui;
+	struct pm8xxx_adc_chan_result result;
+	int batt_temp;
+	int rc;
+	int backup_soc;
+
 	if (!the_chip) {
 		pr_err("called before initialization\n");
 		return -EINVAL;
 	}
 
-	return report_state_of_charge(the_chip);
+#if 0
+	if (chg_state == CHG_STATE_INIT) {
+		rc = pm8xxx_adc_read(the_chip->batt_temp_channel, &result);
+		if (rc) {
+			pr_err("error reading adc channel = %d, rc = %d\n",
+						the_chip->batt_temp_channel, rc);
+			return rc;
+		}
+		pr_debug("batt_temp phy = %lld meas = 0x%llx", result.physical,
+							result.measurement);
+		batt_temp = (int)result.physical;
+
+		mutex_lock(&the_chip->last_ocv_uv_mutex);
+		oem_read_soc_params_raw(the_chip, &raw);
+		calculate_state_of_charge(the_chip, &raw,
+					batt_temp, last_chargecycles);
+		mutex_unlock(&the_chip->last_ocv_uv_mutex);
+	}
+#endif
+
+	soc = report_state_of_charge(the_chip);
+
+	soc_ui = oem_pm8921_bms_correct_soc(chg_state, soc, uim_valid);
+
+	rc = pm8xxx_adc_read(the_chip->batt_temp_channel, &result);
+	if (rc) {
+		pr_err("error reading adc channel = %d, rc = %d\n",
+						the_chip->batt_temp_channel, rc);
+	}
+	else {
+		pr_debug("batt_temp phy = %lld meas = 0x%llx\n", result.physical,
+						result.measurement);
+		batt_temp = (int)result.physical;
+		
+		backup_soc = soc;
+		if ((low_batt_detection == LOW_BATT_DETECTION_ON) &&
+				((soc_ui == 1) || (soc_ui == 0))) {
+			backup_soc = soc_ui;
+		}
+		backup_soc_and_iavg(the_chip, batt_temp, backup_soc);
+		pr_debug("Reported SOC = %d\n", backup_soc);
+	}
+
+	return soc_ui;
+#endif
 }
 EXPORT_SYMBOL_GPL(pm8921_bms_get_percent_charge);
 
@@ -2962,8 +3920,10 @@ void pm8921_bms_charging_end(int is_battery_full)
 		if (last_charge_increase > 100) {
 			last_chargecycles++;
 			last_charge_increase = last_charge_increase % 100;
+			oem_pm8921_bms_correct_last_chargecycles(&last_chargecycles);
 		}
 	}
+	cyclecorrection_req = 0;
 	pr_debug("end_percent = %u%% last_charge_increase = %d"
 			"last_chargecycles = %d\n",
 			the_chip->end_percent,
@@ -3212,6 +4172,66 @@ desay:
 		chip->rbatt_capacitive_mohm
 			= desay_5200_data.rbatt_capacitive_mohm;
 		return 0;
+}
+
+static void oem_set_battery_data(struct pm8921_bms_chip *chip)
+{
+	chip->rbatt_initial_lut = pm8921_bms_oem_data.rbatt_initial_lut;
+	chip->soc_adjust_lut    = pm8921_bms_oem_data.soc_adjust_lut;
+	chip->cycle_adjust_lut  = pm8921_bms_oem_data.cycle_adjust_lut;
+	last_chargecycles       = oem_param_cycles.last_chargecycles;
+	batt_deterioration_status = oem_param_cycles.batt_deteriorationstatus;
+
+	if (oem_param_bms.bms_dummy_soc_test == 0x01) {
+		if (1 <= oem_param_bms.bms_dummy_soc &&
+		    oem_param_bms.bms_dummy_soc <= 100) {
+			bms_fake_battery = oem_param_bms.bms_dummy_soc;
+		}
+	}
+}
+
+int oem_pm8921_bms_get_chargecycles(void)
+{
+	return last_chargecycles;
+}
+
+#define DETERIORATION_THRESH_GOOD_TO_NORMAL  400
+#define DETERIORATION_THRESH_NORMAL_TO_GODD  300
+#define DETERIORATION_THRESH_NERMAL_TO_DEAD  700
+#define DETERIORATION_THRESH_DEAD_TO_NORMAL  600
+
+int oem_pm8921_bms_get_deteriorationstatus(void)
+{
+	switch( batt_deterioration_status )
+	{
+		case BATT_DETERIORATION_GOOD:
+			if (last_chargecycles <= DETERIORATION_THRESH_GOOD_TO_NORMAL) {
+				batt_deterioration_status = BATT_DETERIORATION_GOOD;
+			} else {
+				batt_deterioration_status = BATT_DETERIORATION_NORMAL;
+			}
+			break;
+		case BATT_DETERIORATION_NORMAL:
+			if (last_chargecycles <= DETERIORATION_THRESH_NORMAL_TO_GODD) {
+				batt_deterioration_status = BATT_DETERIORATION_GOOD;
+			} else if (last_chargecycles <= DETERIORATION_THRESH_NERMAL_TO_DEAD) {
+				batt_deterioration_status = BATT_DETERIORATION_NORMAL;
+			} else {
+				batt_deterioration_status = BATT_DETERIORATION_DEAD;
+			}
+			break;
+		case BATT_DETERIORATION_DEAD:
+			if (last_chargecycles <= DETERIORATION_THRESH_DEAD_TO_NORMAL) {
+				batt_deterioration_status = BATT_DETERIORATION_NORMAL;
+			} else {
+				batt_deterioration_status = BATT_DETERIORATION_DEAD;
+			}
+			break;
+		default:
+			break;
+	}
+
+	return batt_deterioration_status;
 }
 
 enum bms_request_operation {
@@ -3659,10 +4679,260 @@ restore_sbi_config:
 	return 0;
 }
 
+enum pmic_bms_temperature_state {
+	TEMP_LOW,
+	TEMP_NORMAL,
+};
+
+#define TEMP_THRESHOLD			-100
+#define PERCENT_OF_AUTO_POWER_OFF	0
+#define PERCENT_OF_LOW_BATTERY		(1 << SOC_SHIFT)
+#define LOW_BATT_OFFSET_BATT		100000
+#define LOW_TEMP_OFFSET_BATT		200000
+#define LOW_TEMP_LOW_BATT_OFFSET_BATT	(LOW_BATT_OFFSET_BATT + LOW_TEMP_OFFSET_BATT)
+#define TEMP_THRESH_BASE		3300
+#define TEMP_THRESH_LOW_BATT_NORMAL	3450
+#define TEMP_THRESH_LOW_BATT_LOW	3650
+#define TEMP_THRESH_POW_OFF_NORMAL	3350
+#define TEMP_THRESH_POW_OFF_LOW		3550
+
+void oem_pm8921_bms_low_vol_detect_active(int vbatt, int batt_temp, int init_state)
+{
+	int auto_power_off_threshold = 0;
+	int low_battery_threshold    = 0;
+	int batt_alarm_threshold_mv = 0;
+	int rc = 0;
+
+	pr_debug("in active vbatt = %d batt_temp = %d init_state = %d\n",
+						vbatt, batt_temp, init_state);
+
+	if (init_state) {
+		pr_err("Uninitialized(vbatt batt_temp)\n");
+		return;
+	}
+
+	if (batt_temp >= TEMP_THRESHOLD) {
+		auto_power_off_threshold = TEMP_THRESH_BASE * 1000;
+		low_battery_threshold    = TEMP_THRESH_BASE * 1000
+						+ LOW_BATT_OFFSET_BATT;
+	} else {
+		auto_power_off_threshold = TEMP_THRESH_BASE * 1000
+						+ LOW_TEMP_OFFSET_BATT;
+		low_battery_threshold    = TEMP_THRESH_BASE * 1000
+						+ LOW_TEMP_LOW_BATT_OFFSET_BATT;
+	}
+
+	if (vbatt <= auto_power_off_threshold) {
+		current_soc_ui     = PERCENT_OF_AUTO_POWER_OFF;
+		last_time_soc_ui   = PERCENT_OF_AUTO_POWER_OFF;
+		low_batt_detection = LOW_BATT_DETECTION_ON;
+	} else if (vbatt <= low_battery_threshold) {
+		if (current_soc_ui < SOC_IGNORE_LOWBATT_THRESHOLD) {
+			current_soc_ui     = PERCENT_OF_LOW_BATTERY;
+			last_time_soc_ui   = PERCENT_OF_LOW_BATTERY;
+			low_batt_detection = LOW_BATT_DETECTION_ON;
+		}
+		else {
+			low_batt_detection = LOW_BATT_DETECTION_OFF;
+		}
+	} else {
+		low_batt_detection = LOW_BATT_DETECTION_OFF;
+	}
+
+	if (current_temp_state == (-EINVAL)) {
+		if (batt_temp >= TEMP_THRESHOLD) {
+			current_temp_state = TEMP_NORMAL;
+			batt_alarm_threshold_mv = TEMP_THRESH_LOW_BATT_NORMAL;
+		} else {
+			current_temp_state = TEMP_LOW;
+			batt_alarm_threshold_mv = TEMP_THRESH_LOW_BATT_LOW;
+		}
+		last_time_temp_state = current_temp_state;
+
+		rc = oem_pm8xxx_batt_alarm_threshold_update(batt_alarm_threshold_mv);
+		if (rc) {
+			pr_err("initial battery alarm threshold error\n");
+		}
+	}
+
+	return;
+}
+EXPORT_SYMBOL(oem_pm8921_bms_low_vol_detect_active);
+
+void oem_pm8921_bms_low_vol_detect_standby(int batt_temp)
+{
+	int get_vol_mv = 0;
+	int set_vol_mv = 0;
+	int rc = 0;
+
+	pr_debug("in standby batt_temp = %d\n", batt_temp);
+
+	if (batt_temp >= TEMP_THRESHOLD) {
+		current_temp_state = TEMP_NORMAL;
+	} else {
+		current_temp_state = TEMP_LOW;
+	}
+
+	if (last_time_temp_state == (-EINVAL)) {
+		last_time_temp_state = current_temp_state;
+	}
+
+	if (current_temp_state != last_time_temp_state) {
+		get_vol_mv = oem_pm8xxx_batt_alarm_get_threshold();
+		if (current_temp_state == TEMP_NORMAL) {
+			if (get_vol_mv <= TEMP_THRESH_POW_OFF_LOW) {
+				set_vol_mv = TEMP_THRESH_POW_OFF_NORMAL;
+			} else {
+				set_vol_mv = TEMP_THRESH_LOW_BATT_NORMAL;
+			}
+		} else {
+			if (get_vol_mv <= TEMP_THRESH_POW_OFF_NORMAL) {
+				set_vol_mv = TEMP_THRESH_POW_OFF_LOW;
+			} else {
+				set_vol_mv = TEMP_THRESH_LOW_BATT_LOW;
+			}
+		}
+		last_time_temp_state = current_temp_state;
+
+		rc = oem_pm8xxx_batt_alarm_threshold_update(set_vol_mv);
+		if (rc) {
+			pr_err("in standby threshold update error vol = %d\n", set_vol_mv);
+		}
+	}
+
+	return;
+}
+EXPORT_SYMBOL(oem_pm8921_bms_low_vol_detect_standby);
+
+void oem_pm8921_bms_detected_low_vol(int vol_mv)
+{
+	int auto_power_off_threshold = 0;
+	int low_battery_threshold    = 0;
+	int set_vol_mv = 0;
+	int rc = 0;
+
+	if (current_temp_state == TEMP_NORMAL) {
+		auto_power_off_threshold = TEMP_THRESH_POW_OFF_NORMAL;
+		low_battery_threshold    = TEMP_THRESH_LOW_BATT_NORMAL;
+	} else {
+		auto_power_off_threshold = TEMP_THRESH_POW_OFF_LOW;
+		low_battery_threshold    = TEMP_THRESH_LOW_BATT_LOW;
+	}
+
+	if (vol_mv <= auto_power_off_threshold) {
+		current_soc_ui     = PERCENT_OF_AUTO_POWER_OFF;
+		last_time_soc_ui   = PERCENT_OF_AUTO_POWER_OFF;
+		low_batt_detection = LOW_BATT_DETECTION_ON;
+	} else if (vol_mv <= low_battery_threshold) {
+		current_soc_ui     = PERCENT_OF_LOW_BATTERY;
+		last_time_soc_ui   = PERCENT_OF_LOW_BATTERY;
+		low_batt_detection = LOW_BATT_DETECTION_ON;
+	}
+
+	if (vol_mv >= low_battery_threshold) {
+		set_vol_mv = auto_power_off_threshold;
+		rc = oem_pm8xxx_batt_alarm_threshold_update(set_vol_mv);
+		if (rc) {
+			pr_err("in detect threshold update error vol = %d\n", set_vol_mv);
+		}
+	}
+
+	return;
+}
+EXPORT_SYMBOL(oem_pm8921_bms_detected_low_vol);
+
+enum {
+	GET_TYPE_CC,
+	GET_TYPE_OCV,
+	GET_TYPE_VBATT_AVG,
+	GET_TYPE_VSENSE_AVG,
+	GET_TYPE_LAST_GOOD_OCV,
+	GET_TYPE_VBATT_FOR_RBATT,
+	GET_TYPE_VSENSE_FOR_RBATT,
+};
+
+#define GET_PARAM_LENGTH 16
+
+static int oem_bms_set_param;
+static int oem_bms_get_param;
+static int oem_bms_req_param_cmd(const char *val, struct kernel_param *kp)
+{
+	int ret;
+	uint16_t bms_param = 0;
+
+	oem_bms_set_param = 0;
+
+	ret = param_set_int(val, kp);
+	if (ret) {
+		pr_err("error setting value %d\n", ret);
+		return ret;
+	}
+
+	switch (oem_bms_get_param) {
+	case GET_TYPE_CC:
+		read_cc(the_chip, &oem_bms_set_param);
+		pr_info("CC = %d\n", oem_bms_set_param);
+		break;
+	case GET_TYPE_OCV:
+		pm_bms_read_output_data(the_chip,
+			OCV_FOR_RBATT, &bms_param);
+		oem_bms_set_param = (int)bms_param;
+		pr_info("OCV = %d\n", oem_bms_set_param);
+		break;
+	case GET_TYPE_VBATT_FOR_RBATT:
+		pm_bms_read_output_data(the_chip,
+			VBATT_FOR_RBATT, &bms_param);
+		oem_bms_set_param = (int)bms_param;
+		pr_info("Vbatt for Rbatt = %d\n", oem_bms_set_param);
+		break;
+	case GET_TYPE_VSENSE_FOR_RBATT:
+		pm_bms_read_output_data(the_chip,
+			VSENSE_FOR_RBATT, &bms_param);
+		oem_bms_set_param = (int)bms_param;
+		pr_info("Vsense for Rbatt = %d\n", oem_bms_set_param);
+		break;
+	case GET_TYPE_LAST_GOOD_OCV:
+		pm_bms_read_output_data(the_chip,
+			LAST_GOOD_OCV_VALUE, &bms_param);
+		oem_bms_set_param = (int)bms_param;
+		pr_info("Last Good OCV = %d\n", oem_bms_set_param);
+		break;
+	case GET_TYPE_VBATT_AVG:
+		pm_bms_read_output_data(the_chip,
+			VBATT_AVG, &bms_param);
+		oem_bms_set_param = (int)bms_param;
+		pr_info("Vbatt Avg = %d\n", oem_bms_set_param);
+		break;
+	case GET_TYPE_VSENSE_AVG:
+		pm_bms_read_output_data(the_chip,
+			VSENSE_AVG, &bms_param);
+		oem_bms_set_param = (int)bms_param;
+		pr_info("Vsense Avg = %d\n", oem_bms_set_param);
+		break;
+	default:
+		oem_bms_set_param = -EINVAL;
+		break;
+	}
+
+	return 0;
+}
+
+static int oem_bms_res_param_cmd(char *buffer, struct kernel_param *kp)
+{
+	int res = 0;
+	
+	res = snprintf(buffer, GET_PARAM_LENGTH, "%d", oem_bms_set_param);
+
+	return res;
+}
+module_param_call(oem_bms_get_param, oem_bms_req_param_cmd,
+					oem_bms_res_param_cmd, &oem_bms_get_param, 0644);
+
 static int __devinit pm8921_bms_probe(struct platform_device *pdev)
 {
 	int rc = 0;
 	int vbatt = 0;
+	int calc_soc = 0;
 	struct pm8921_bms_chip *chip;
 	const struct pm8921_bms_platform_data *pdata
 				= pdev->dev.platform_data;
@@ -3814,6 +5084,7 @@ static int __devinit pm8921_bms_probe(struct platform_device *pdev)
 	pm8921_bms_enable_irq(chip, PM8921_BMS_GOOD_OCV);
 	pm8921_bms_enable_irq(chip, PM8921_BMS_OCV_FOR_R);
 
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	rc = pm8921_bms_configure_batt_alarm(chip);
 	if (rc) {
 		pr_err("Couldn't configure battery alarm! rc=%d\n", rc);
@@ -3825,16 +5096,33 @@ static int __devinit pm8921_bms_probe(struct platform_device *pdev)
 		pr_err("Couldn't enable battery alarm! rc=%d\n", rc);
 		goto free_irqs;
 	}
+#endif
 
 	calculate_soc_work(&(chip->calculate_soc_delayed_work.work));
 
 	rc = get_battery_uvolts(chip, &vbatt);
+
+	oem_chg_param_init();
+	oem_set_battery_data(chip);
+	oem_calculate_ocv_initial(chip);
+	calc_soc = pm8921_bms_get_percent_charge(CHG_STATE_INIT, 0);
+	current_soc    = calc_soc << SOC_SHIFT;
+	current_soc_ui = current_soc;
+
 	if (!rc)
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 		pr_info("OK battery_capacity_at_boot=%d volt = %d ocv = %d\n",
 				pm8921_bms_get_percent_charge(),
 				vbatt, chip->last_ocv_uv);
+#else
+		pr_info("OK battery_capacity_at_boot=%d volt = %d ocv = %d\n",
+				current_soc, 
+				vbatt, chip->last_ocv_uv);
+#endif
 	else
 		pr_info("Unable to read battery voltage at boot\n");
+
+	oem_pm8921_bms_init_cyclecorrection();
 
 	return 0;
 

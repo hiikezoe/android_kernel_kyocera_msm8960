@@ -18,6 +18,8 @@
 
 #include "board-8960.h"
 
+#define NOVATEC_CMDPANEL
+
 #define VREG_CONSUMERS(_id) \
 	static struct regulator_consumer_supply vreg_consumers_##_id[]
 
@@ -35,6 +37,7 @@ VREG_CONSUMERS(L2) = {
 	REGULATOR_SUPPLY("mipi_csi_vdd",	"msm_csid.0"),
 	REGULATOR_SUPPLY("mipi_csi_vdd",	"msm_csid.1"),
 	REGULATOR_SUPPLY("mipi_csi_vdd",	"msm_csid.2"),
+	REGULATOR_SUPPLY("mipi_csi_vdd",	"3-0034"),
 };
 VREG_CONSUMERS(L3) = {
 	REGULATOR_SUPPLY("8921_l3",		NULL),
@@ -79,6 +82,7 @@ VREG_CONSUMERS(L11) = {
 	REGULATOR_SUPPLY("cam_vana",		"4-0048"),
 	REGULATOR_SUPPLY("cam_vana",		"4-0020"),
 	REGULATOR_SUPPLY("cam_vana",		"4-0034"),
+	REGULATOR_SUPPLY("cam_vana",		"3-0034"),
 };
 VREG_CONSUMERS(L12) = {
 	REGULATOR_SUPPLY("8921_l12",		NULL),
@@ -105,6 +109,7 @@ VREG_CONSUMERS(L16) = {
 	REGULATOR_SUPPLY("cam_vaf",		"4-0048"),
 	REGULATOR_SUPPLY("cam_vaf",		"4-0020"),
 	REGULATOR_SUPPLY("cam_vaf",		"4-0034"),
+	REGULATOR_SUPPLY("cam_vaf",		"3-0034"),
 };
 VREG_CONSUMERS(L17) = {
 	REGULATOR_SUPPLY("8921_l17",		NULL),
@@ -217,6 +222,7 @@ VREG_CONSUMERS(LVS4) = {
 	REGULATOR_SUPPLY("8921_lvs4",		NULL),
 	REGULATOR_SUPPLY("vcc_i2c",		"3-0024"),
 	REGULATOR_SUPPLY("vcc_i2c",		"3-004a"),
+	REGULATOR_SUPPLY("cam_vio",		"3-0034"),
 };
 VREG_CONSUMERS(LVS5) = {
 	REGULATOR_SUPPLY("8921_lvs5",		NULL),
@@ -226,6 +232,9 @@ VREG_CONSUMERS(LVS5) = {
 	REGULATOR_SUPPLY("cam_vio",		"4-0048"),
 	REGULATOR_SUPPLY("cam_vio",		"4-0020"),
 	REGULATOR_SUPPLY("cam_vio",		"4-0034"),
+#ifdef NOVATEC_CMDPANEL
+	REGULATOR_SUPPLY("dsi_lvs5",		"mipi_dsi.1"),
+#endif
 };
 /* This mapping is used for CDP only. */
 VREG_CONSUMERS(CDP_LVS6) = {
@@ -497,7 +506,11 @@ struct gpio_regulator_platform_data msm_gpio_regulator_pdata[] __devinitdata = {
 	GPIO_VREG(EXT_3P3V, "ext_3p3v", "ext_3p3v_en",
 		PM8921_GPIO_PM_TO_SYS(17), NULL),
 	GPIO_VREG(EXT_OTG_SW, "ext_otg_sw", "ext_otg_sw_en",
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 		PM8921_GPIO_PM_TO_SYS(42), "8921_usb_otg"),
+#else
+		PM8921_GPIO_PM_TO_SYS(44), "8921_usb_otg"),
+#endif
 };
 
 /* SAW regulator constraints */
@@ -510,6 +523,7 @@ struct regulator_init_data msm_saw_regulator_pdata_s6 =
 /* PM8921 regulator constraints */
 struct pm8xxx_regulator_platform_data
 msm_pm8921_regulator_pdata[] __devinitdata = {
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	/*
 	 *		ID   name always_on pd min_uV   max_uV   en_t supply
 	 *	system_uA reg_ID
@@ -526,10 +540,29 @@ msm_pm8921_regulator_pdata[] __devinitdata = {
 	/*	     ID        name      always_on pd en_t supply    reg_ID */
 	PM8XXX_VS300(USB_OTG,  "8921_usb_otg",  0, 1, 0,   "ext_5v", 5),
 	PM8XXX_VS300(HDMI_MVS, "8921_hdmi_mvs", 0, 1, 0,   "ext_5v", 6),
+#else
+	/*
+	 *		ID   name always_on pd min_uV   max_uV   en_t supply
+	 *	system_uA reg_ID
+	 */
+	PM8XXX_NLDO1200(L26, "8921_l26", 0, 1, 375000, 1050000, 200, "8921_s7",
+		0, 1),
+	PM8XXX_NLDO1200(L27, "8921_l27", 0, 1, 375000, 1050000, 200, "8921_s7",
+		0, 2),
+	PM8XXX_NLDO1200(L28, "8921_l28", 0, 1, 375000, 1050000, 200, "8921_s7",
+		0, 3),
+	PM8XXX_LDO(L29,      "8921_l29", 0, 1, 1800000, 2100000, 200, "8921_s8",
+		0, 4),
+
+	/*	     ID        name      always_on pd en_t supply    reg_ID */
+	PM8XXX_VS300(USB_OTG,  "8921_usb_otg",  0, 0, 0,   NULL,     5),
+	PM8XXX_VS300(HDMI_MVS, "8921_hdmi_mvs", 0, 0, 0,   NULL,     6),
+#endif
 };
 
 static struct rpm_regulator_init_data
 msm_rpm_regulator_init_data[] __devinitdata = {
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	/*	ID a_on pd ss min_uV   max_uV  supply sys_uA  freq  fm  ss_fm */
 	RPM_SMPS(S1, 1, 1, 0, 1225000, 1225000, NULL, 100000, 3p20, NONE, NONE),
 	RPM_SMPS(S2, 0, 1, 0, 1300000, 1300000, NULL,      0, 1p60, NONE, NONE),
@@ -573,6 +606,51 @@ msm_rpm_regulator_init_data[] __devinitdata = {
 
 	/*	 ID      a_on  ss min_uV   max_uV   supply        freq */
 	RPM_NCP(NCP,	 0,    0, 1800000, 1800000, "8921_l6",    1p60),
+#else
+	/*	ID a_on pd ss min_uV   max_uV  supply sys_uA  freq  fm  ss_fm */
+	RPM_SMPS(S1, 1, 1, 0, 1225000, 1225000, NULL, 100000, 3p20, NONE, NONE),
+	RPM_SMPS(S2, 0, 0, 0, 1300000, 1300000, NULL,      0, 1p60, NONE, NONE),
+	RPM_SMPS(S3, 0, 1, 1,  500000, 1150000, NULL, 100000, 4p80, NONE, NONE),
+	RPM_SMPS(S4, 1, 1, 0, 1800000, 1800000, NULL, 100000, 1p60, AUTO, AUTO),
+	RPM_SMPS(S7, 0, 1, 0, 1150000, 1150000, NULL, 100000, 3p20, NONE, NONE),
+	RPM_SMPS(S8, 1, 0, 1, 2050000, 2050000, NULL, 100000, 1p60, NONE, NONE),
+
+	/*	ID     a_on pd ss min_uV   max_uV  supply  sys_uA init_ip */
+	RPM_LDO(L1,	 1, 1, 0, 1050000, 1050000, "8921_s4", 0, 10000),
+	RPM_LDO(L2,	 0, 1, 0, 1200000, 1200000, "8921_s4", 0, 0),
+	RPM_LDO(L3,	 0, 1, 0, 3075000, 3075000, NULL,      0, 0),
+	RPM_LDO(L4,	 1, 0, 0, 1800000, 1800000, NULL,      10000, 10000),
+	RPM_LDO(L5,	 0, 1, 0, 2950000, 2950000, NULL,      0, 0),
+	RPM_LDO(L6,	 0, 1, 0, 2950000, 3000000, NULL,      0, 0),
+	RPM_LDO(L7,	 1, 1, 0, 1850000, 2950000, NULL,      10000, 10000),
+	RPM_LDO(L8,	 0, 1, 0, 2800000, 3000000, NULL,      0, 0),
+	RPM_LDO(L9,	 0, 1, 0, 2800000, 3000000, NULL,      0, 0),
+	RPM_LDO(L10,	 0, 1, 0, 3000000, 3000000, NULL,      0, 0),
+	RPM_LDO(L11,	 0, 1, 0, 2700000, 2850000, NULL,      0, 0),
+	RPM_LDO(L12,	 0, 1, 0, 1200000, 1200000, "8921_s4", 0, 0),
+	RPM_LDO(L14,	 1, 1, 0, 1800000, 1800000, NULL,      0, 0),
+	RPM_LDO(L15,	 0, 1, 0, 1800000, 3000000, NULL,      0, 0),
+	RPM_LDO(L16,	 0, 1, 0, 2700000, 2800000, NULL,      0, 0),
+	RPM_LDO(L17,	 1, 1, 0, 1800000, 3000000, NULL,      0, 0),
+	RPM_LDO(L18,	 0, 1, 0, 1200000, 1300000, "8921_s4", 0, 0),
+	RPM_LDO(L21,	 0, 1, 0, 1900000, 1900000, "8921_s8", 0, 0),
+	RPM_LDO(L22,	 0, 0, 0, 2750000, 2850000, NULL,      0, 0),
+	RPM_LDO(L23,	 1, 1, 1, 1800000, 1800000, "8921_s8", 10000, 10000),
+	RPM_LDO(L24,	 0, 1, 1,  750000, 1150000, "8921_s1", 10000, 10000),
+	RPM_LDO(L25,	 1, 1, 0, 1250000, 1250000, "8921_s1", 10000, 10000),
+
+	/*	ID     a_on pd ss		    supply */
+	RPM_VS(LVS1,	 0, 1, 0,		    "8921_s4"),
+	RPM_VS(LVS2,	 0, 1, 0,		    "8921_s1"),
+	RPM_VS(LVS3,	 0, 1, 0,		    "8921_s4"),
+	RPM_VS(LVS4,	 0, 1, 0,		    "8921_s4"),
+	RPM_VS(LVS5,	 0, 1, 0,		    "8921_s4"),
+	RPM_VS(LVS6,	 0, 1, 0,		    "8921_s4"),
+	RPM_VS(LVS7,	 0, 0, 0,		    "8921_s4"),
+
+	/*	 ID      a_on  ss min_uV   max_uV   supply        freq */
+	RPM_NCP(NCP,	 0,    0, 1800000, 1800000, "8921_l6",    1p60),
+#endif
 };
 
 int msm_pm8921_regulator_pdata_len __devinitdata =

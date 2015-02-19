@@ -582,6 +582,11 @@ static void pm8xxx_rtc_shutdown(struct platform_device *pdev)
 		if (rc < 0)
 			dev_err(rtc_dd->rtc_dev, "PM8xxx write failed\n");
 
+		/* Clear TEMP_ALARM register */
+		rc = pm8xxx_writeb(rtc_dd->rtc_dev->parent, 0x9B, 0x0);
+		if (rc < 0)
+			dev_err(rtc_dd->rtc_dev, "PM8xxx write failed\n");
+
 fail_alarm_disable:
 		spin_unlock_irqrestore(&rtc_dd->ctrl_reg_lock, irq_flags);
 	}

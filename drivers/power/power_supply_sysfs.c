@@ -44,8 +44,13 @@ static ssize_t power_supply_show_property(struct device *dev,
 					  struct device_attribute *attr,
 					  char *buf) {
 	static char *type_text[] = {
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 		"Unknown", "Battery", "UPS", "Mains", "USB",
 		"USB_DCP", "USB_CDP", "USB_ACA"
+#else
+		"Unknown", "Battery", "UPS", "Mains", "USB",
+		"USB_DCP", "USB_CDP", "USB_ACA", "MHL", "Bms",
+#endif
 	};
 	static char *status_text[] = {
 		"Unknown", "Charging", "Discharging", "Not charging", "Full"
@@ -174,6 +179,13 @@ static struct device_attribute power_supply_attrs[] = {
 	POWER_SUPPLY_ATTR(time_to_full_avg),
 	POWER_SUPPLY_ATTR(type),
 	POWER_SUPPLY_ATTR(scope),
+	POWER_SUPPLY_ATTR(pa_therm),
+	POWER_SUPPLY_ATTR(camera_therm),
+	POWER_SUPPLY_ATTR(substrate_therm),
+	POWER_SUPPLY_ATTR(usb_therm),
+	POWER_SUPPLY_ATTR(charge_connect_state),
+	POWER_SUPPLY_ATTR(bms_cycle),
+	POWER_SUPPLY_ATTR(bms_batt_status),
 	/* Properties of type `const char *' */
 	POWER_SUPPLY_ATTR(model_name),
 	POWER_SUPPLY_ATTR(manufacturer),
@@ -230,6 +242,7 @@ void power_supply_init_attrs(struct device_type *dev_type)
 		__power_supply_attrs[i] = &power_supply_attrs[i].attr;
 }
 
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 static char *kstruprdup(const char *str, gfp_t gfp)
 {
 	char *ret, *ustr;
@@ -246,12 +259,25 @@ static char *kstruprdup(const char *str, gfp_t gfp)
 
 	return ret;
 }
+#endif
+
+void kstruprdup_oem(const char *str, char *ustr)
+{
+	while (*str)
+		*ustr++ = toupper(*str++);
+
+	*ustr = 0;
+}
 
 int power_supply_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
 	struct power_supply *psy = dev_get_drvdata(dev);
 	int ret = 0, j;
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	char *prop_buf;
+#else
+	char prop_buf[30];
+#endif
 	char *attrname;
 
 	dev_dbg(dev, "uevent\n");
@@ -267,13 +293,18 @@ int power_supply_uevent(struct device *dev, struct kobj_uevent_env *env)
 	if (ret)
 		return ret;
 
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	prop_buf = (char *)get_zeroed_page(GFP_KERNEL);
 	if (!prop_buf)
 		return -ENOMEM;
+#else
+	memset(prop_buf, 0, sizeof(prop_buf));
+#endif
 
 	for (j = 0; j < psy->num_properties; j++) {
 		struct device_attribute *attr;
 		char *line;
+		char param_name[50];
 
 		attr = &power_supply_attrs[psy->properties[j]];
 
@@ -292,7 +323,12 @@ int power_supply_uevent(struct device *dev, struct kobj_uevent_env *env)
 		if (line)
 			*line = 0;
 
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 		attrname = kstruprdup(attr->attr.name, GFP_KERNEL);
+#endif
+		attrname = param_name;
+		kstruprdup_oem(attr->attr.name, param_name);
+
 		if (!attrname) {
 			ret = -ENOMEM;
 			goto out;
@@ -301,13 +337,17 @@ int power_supply_uevent(struct device *dev, struct kobj_uevent_env *env)
 		dev_dbg(dev, "prop %s=%s\n", attrname, prop_buf);
 
 		ret = add_uevent_var(env, "POWER_SUPPLY_%s=%s", attrname, prop_buf);
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 		kfree(attrname);
+#endif
 		if (ret)
 			goto out;
 	}
 
 out:
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	free_page((unsigned long)prop_buf);
+#endif
 
 	return ret;
 }

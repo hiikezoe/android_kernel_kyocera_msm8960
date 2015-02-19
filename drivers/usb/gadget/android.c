@@ -31,6 +31,7 @@
 #include <linux/usb/android.h>
 
 #include "gadget_chips.h"
+#include <mach/msm_smsm.h>
 #ifndef DEBUG
 #define DEBUG 1
 #endif
@@ -63,6 +64,7 @@
 #include "u_data_hsic.c"
 #include "u_ctrl_hsuart.c"
 #include "u_data_hsuart.c"
+#include "f_kc_serial.c"
 #include "f_serial.c"
 #include "f_acm.c"
 #include "f_adb.c"
@@ -76,9 +78,12 @@
 #include "f_rndis.c"
 #include "rndis.c"
 #endif
+#include "f_ncm.c"
 #include "u_ether.c"
 #include "u_bam_data.c"
+#if 0
 #include "f_mbim.c"
+#endif
 #include "f_qc_ecm.c"
 #include "f_qc_rndis.c"
 #include "u_qc_ether.c"
@@ -92,6 +97,7 @@ MODULE_LICENSE("GPL");
 MODULE_VERSION("1.0");
 
 static const char longname[] = "Gadget Android";
+static int diag_flag = 0;
 
 /* Default vendor and product IDs, overridden by userspace */
 #define VENDOR_ID		0x18D1
@@ -150,6 +156,7 @@ struct android_dev {
 	char pm_qos[5];
 	struct pm_qos_request pm_qos_req_dma;
 	struct work_struct work;
+	struct work_struct work2;
 
 	/* A list of struct android_configuration */
 	struct list_head configs;
@@ -173,6 +180,7 @@ struct android_configuration {
 static struct class *android_class;
 static struct list_head android_dev_list;
 static int android_dev_count;
+static int android_connect_flag;
 static int android_bind_config(struct usb_configuration *c);
 static void android_unbind_config(struct usb_configuration *c);
 static struct android_dev *cdev_to_android_dev(struct usb_composite_dev *cdev);
@@ -189,6 +197,10 @@ static void free_android_config(struct android_dev *dev,
 static char manufacturer_string[256];
 static char product_string[256];
 static char serial_string[256];
+static char kc_serial_string[256];
+static char factory_string[8];
+static char otg_volt_string[8];
+static char otg_volt_wait_string[8];
 
 /* String Table */
 static struct usb_string strings_dev[] = {
@@ -713,6 +725,7 @@ static struct android_usb_function ecm_qc_function = {
 	.attributes	= ecm_function_attributes,
 };
 
+#if 0
 /* MBIM - used with BAM */
 #define MAX_MBIM_INSTANCES 1
 
@@ -739,7 +752,7 @@ static struct android_usb_function mbim_function = {
 	.bind_config	= mbim_function_bind_config,
 	.init		= mbim_function_init,
 };
-
+#endif
 
 /* DIAG */
 static char diag_clients[32];	    /*enabled DIAG clients- "diag[,diag_mdm]" */
@@ -775,6 +788,15 @@ static int diag_function_bind_config(struct android_usb_function *f,
 	int once = 0, err = -1;
 	int (*notify)(uint32_t, const char *);
 	struct android_dev *dev = cdev_to_android_dev(c->cdev);
+
+	if(diag_flag == 0){
+		diag_flag++;
+	}else if(diag_flag == 1){
+		msleep(200);
+		diag_flag++;
+	}else{
+		/* nothing_to_do */
+	}
 
 	strlcpy(buf, diag_clients, sizeof(buf));
 	b = strim(buf);
@@ -936,6 +958,81 @@ static struct android_usb_function serial_function = {
 	.bind_config	= serial_function_bind_config,
 	.attributes	= serial_function_attributes,
 };
+
+#if 1
+/* KC_SERIAL */
+static char kc_serial_transports[32];	/*enabled FSERIAL ports - "tty[,sdio]"*/
+static ssize_t kc_serial_transports_store(
+		struct device *device, struct device_attribute *attr,
+		const char *buff, size_t size)
+{
+	strlcpy(kc_serial_transports, buff, sizeof(kc_serial_transports));
+
+	return size;
+}
+
+static DEVICE_ATTR(kc_transports, S_IWUSR, NULL, kc_serial_transports_store);
+static struct device_attribute *kc_serial_function_attributes[] = {
+					&dev_attr_kc_transports, NULL };
+
+static void kc_serial_function_cleanup(struct android_usb_function *f)
+{
+	gserial_cleanup();
+}
+
+static int kc_serial_function_bind_config(struct android_usb_function *f,
+					struct usb_configuration *c)
+{
+	char *name;
+	char buf[32], *b;
+	int err = -1, i;
+	static int serial_initialized = 0, ports = 0;
+
+	if (serial_initialized)
+		goto bind_config;
+
+	serial_initialized = 1;
+	strlcpy(buf, kc_serial_transports, sizeof(buf));
+	b = strim(buf);
+
+	while (b) {
+		name = strsep(&b, ",");
+
+		if (name) {
+			err = kc_gserial_init_port(ports, name, NULL);
+			if (err) {
+				pr_err("serial: Cannot open port '%s'", name);
+				goto out;
+			}
+			ports++;
+		}
+	}
+	err = kc_gport_setup(c);
+	if (err) {
+		pr_err("serial: Cannot setup transports");
+		goto out;
+	}
+
+bind_config:
+	for (i = 0; i < ports; i++) {
+		err = kc_gser_bind_config(c, i);
+		if (err) {
+			pr_err("serial: kc_bind_config failed for port %d", i);
+			goto out;
+		}
+	}
+
+out:
+	return err;
+}
+
+static struct android_usb_function kc_serial_function = {
+	.name		= "kc_serial",
+	.cleanup	= kc_serial_function_cleanup,
+	.bind_config	= kc_serial_function_bind_config,
+	.attributes	= kc_serial_function_attributes,
+};
+#endif
 
 /* ACM */
 static char acm_transports[32];	/*enabled ACM ports - "tty[,sdio]"*/
@@ -1635,17 +1732,50 @@ static ssize_t mass_storage_inquiry_store(struct device *dev,
 	struct mass_storage_function_config *config = f->config;
 	if (size >= sizeof(config->common->inquiry_string))
 		return -EINVAL;
-	if (sscanf(buf, "%28s", config->common->inquiry_string) != 1)
-		return -EINVAL;
-	return size;
+	return strlcpy(config->common->inquiry_string, buf, (8 + 16 + 4 + 1));
 }
 
 static DEVICE_ATTR(inquiry_string, S_IRUGO | S_IWUSR,
 					mass_storage_inquiry_show,
 					mass_storage_inquiry_store);
 
+static ssize_t fsg_store_vendor_cmd(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t size)
+{
+	struct android_usb_function *f = dev_get_drvdata(dev);
+	struct mass_storage_function_config *config = f->config;
+	if (config == NULL || config->common == NULL
+		|| config->common->vendor_data == NULL)
+		return -EINVAL;
+	if (sscanf(buf, "%2x%16s", (unsigned int*)&config->common->vendor_data,
+		&config->common->vendor_data[1]) != 2)
+		return -EINVAL;
+
+	return size;
+}
+static DEVICE_ATTR(vendor_cmd, S_IWUSR | S_IWGRP, 0, fsg_store_vendor_cmd);
+
+static ssize_t fsg_store_vendor_cmd2(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t size)
+{
+	struct android_usb_function *f = dev_get_drvdata(dev);
+	struct mass_storage_function_config *config = f->config;
+	if (config == NULL || config->common == NULL
+		|| config->common->vendor_data2 == NULL)
+		return -EINVAL;
+	if (sscanf(buf, "%2x%16s", (unsigned int*)&config->common->vendor_data2,
+		&config->common->vendor_data2[1]) != 2)
+		return -EINVAL;
+
+	return size;
+}
+static DEVICE_ATTR(vendor_cmd2, S_IWUSR | S_IWGRP, 0, fsg_store_vendor_cmd2);
+
+
 static struct device_attribute *mass_storage_function_attributes[] = {
 	&dev_attr_inquiry_string,
+	&dev_attr_vendor_cmd,
+	&dev_attr_vendor_cmd2,
 	NULL
 };
 
@@ -1798,8 +1928,101 @@ static struct android_usb_function uasp_function = {
 	.bind_config	= uasp_function_bind_config,
 };
 
+struct ncm_function_config {
+	u8      ethaddr[ETH_ALEN];
+};
+
+static int ncm_function_init(struct android_usb_function *f,
+					struct usb_composite_dev *cdev)
+{
+	f->config = kzalloc(sizeof(struct ncm_function_config), GFP_KERNEL);
+	if (!f->config)
+		return -ENOMEM;
+	return 0;
+}
+
+static void ncm_function_cleanup(struct android_usb_function *f)
+{
+	kfree(f->config);
+	f->config = NULL;
+}
+
+static int ncm_function_bind_config(struct android_usb_function *f,
+					struct usb_configuration *c)
+{
+	int ret;
+	struct ncm_function_config *ncm = f->config;
+
+	if (!ncm) {
+		pr_err("%s: ncm_pdata\n", __func__);
+		return -1;
+	}
+
+	pr_info("%s MAC: %02X:%02X:%02X:%02X:%02X:%02X\n", __func__,
+		ncm->ethaddr[0], ncm->ethaddr[1], ncm->ethaddr[2],
+		ncm->ethaddr[3], ncm->ethaddr[4], ncm->ethaddr[5]);
+
+	ret = gether_setup(c->cdev->gadget, NULL);
+	if (ret) {
+		pr_err("%s: gether_setup failed\n", __func__);
+		return ret;
+	}
+
+	return ncm_bind_config(c, ncm->ethaddr);
+}
+
+static void ncm_function_unbind_config(struct android_usb_function *f,
+						struct usb_configuration *c)
+{
+	gether_cleanup();
+}
+
+
+static ssize_t ncm_ethaddr_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct android_usb_function *f = dev_get_drvdata(dev);
+	struct ncm_function_config *ncm = f->config;
+	return snprintf(buf, PAGE_SIZE, "%02x:%02x:%02x:%02x:%02x:%02x\n",
+		ncm->ethaddr[0], ncm->ethaddr[1], ncm->ethaddr[2],
+		ncm->ethaddr[3], ncm->ethaddr[4], ncm->ethaddr[5]);
+}
+
+static ssize_t ncm_ethaddr_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t size)
+{
+	struct android_usb_function *f = dev_get_drvdata(dev);
+	struct ncm_function_config *ncm = f->config;
+
+	if (sscanf(buf, "%02x:%02x:%02x:%02x:%02x:%02x\n",
+		    (int *)&ncm->ethaddr[0], (int *)&ncm->ethaddr[1],
+		    (int *)&ncm->ethaddr[2], (int *)&ncm->ethaddr[3],
+		    (int *)&ncm->ethaddr[4], (int *)&ncm->ethaddr[5]) == 6)
+		return size;
+	return -EINVAL;
+}
+
+static DEVICE_ATTR(eth_addr, S_IRUGO | S_IWUSR, ncm_ethaddr_show,
+					       ncm_ethaddr_store);
+
+static struct device_attribute *ncm_function_attributes[] = {
+	&dev_attr_eth_addr,
+	NULL
+};
+
+static struct android_usb_function ncm_function = {
+	.name		= "ncm",
+	.init		= ncm_function_init,
+	.cleanup	= ncm_function_cleanup,
+	.bind_config	= ncm_function_bind_config,
+	.unbind_config	= ncm_function_unbind_config,
+	.attributes	= ncm_function_attributes,
+};
+
 static struct android_usb_function *supported_functions[] = {
+#if 0
 	&mbim_function,
+#endif
 	&ecm_qc_function,
 	&rmnet_smd_function,
 	&rmnet_sdio_function,
@@ -1808,6 +2031,7 @@ static struct android_usb_function *supported_functions[] = {
 	&diag_function,
 	&qdss_function,
 	&serial_function,
+	&kc_serial_function,
 	&adb_function,
 	&ccid_function,
 	&acm_function,
@@ -1823,6 +2047,7 @@ static struct android_usb_function *supported_functions[] = {
 	&accessory_function,
 	&audio_source_function,
 	&uasp_function,
+	&ncm_function,
 	NULL
 };
 
@@ -1925,11 +2150,16 @@ android_bind_enabled_functions(struct android_dev *dev,
 		container_of(c, struct android_configuration, usb_config);
 	int ret;
 
+	strcpy(serial_string, "KYOCERA");
+
 	list_for_each_entry(f, &conf->enabled_functions, enabled_list) {
 		ret = f->bind_config(f, c);
 		if (ret) {
 			pr_err("%s: %s failed", __func__, f->name);
 			return ret;
+		}
+		if (!strcmp("adb", f->name)) {
+			strlcpy(serial_string, kc_serial_string, sizeof(serial_string));
 		}
 	}
 	return 0;
@@ -2126,7 +2356,6 @@ static ssize_t enable_store(struct device *pdev, struct device_attribute *attr,
 	struct android_usb_function *f;
 	struct android_configuration *conf;
 	int enabled = 0;
-	static DEFINE_RATELIMIT_STATE(rl, 10*HZ, 1);
 
 	if (!cdev)
 		return -ENODEV;
@@ -2151,8 +2380,12 @@ static ssize_t enable_store(struct device *pdev, struct device_attribute *attr,
 				if (f->enable)
 					f->enable(f);
 			}
+if (strcmp(serial_string,"0123456789ABCDEF")) {
 		android_enable(dev);
 		dev->enabled = true;
+}else{
+	android_connect_flag = 1;
+}
 	} else if (!enabled && dev->enabled) {
 		android_disable(dev);
 		list_for_each_entry(conf, &dev->configs, list_item)
@@ -2162,7 +2395,7 @@ static ssize_t enable_store(struct device *pdev, struct device_attribute *attr,
 					f->disable(f);
 			}
 		dev->enabled = false;
-	} else if (__ratelimit(&rl)) {
+	} else {
 		pr_err("android_usb: already %s\n",
 				dev->enabled ? "enabled" : "disabled");
 	}
@@ -2210,6 +2443,25 @@ static ssize_t state_show(struct device *pdev, struct device_attribute *attr,
 	spin_unlock_irqrestore(&cdev->lock, flags);
 out:
 	return snprintf(buf, PAGE_SIZE, "%s\n", state);
+}
+
+static ssize_t factory_show(struct device *pdev, struct device_attribute *attr,
+			   char *buf)
+{
+	return snprintf(buf, PAGE_SIZE, "%s\n", factory_string);
+}
+
+static ssize_t factory_store(struct device *pdev,
+		struct device_attribute *attr, const char *buff, size_t size)
+{
+	if (size > 8)
+		return -EINVAL;
+	if (strcmp(buff, "fact1") && strcmp(buff, "fact2") && strcmp(buff, "normal"))
+		return -EINVAL;
+
+	sscanf(buff, "%s", factory_string);
+
+	return size;
 }
 
 #define DESCRIPTOR_ATTR(field, format_string)				\
@@ -2261,8 +2513,154 @@ DESCRIPTOR_ATTR(bDeviceSubClass, "%d\n")
 DESCRIPTOR_ATTR(bDeviceProtocol, "%d\n")
 DESCRIPTOR_STRING_ATTR(iManufacturer, manufacturer_string)
 DESCRIPTOR_STRING_ATTR(iProduct, product_string)
-DESCRIPTOR_STRING_ATTR(iSerial, serial_string)
 
+static ssize_t serial_show(struct device *pdev,
+			   struct device_attribute *attr, char *buf)
+{
+	return snprintf(buf, PAGE_SIZE, "%s", kc_serial_string);
+}
+
+static ssize_t serial_store(struct device *pdev,
+			   struct device_attribute *attr,
+			   const char *buff, size_t size)
+{
+	struct android_dev *dev = dev_get_drvdata(pdev);
+
+	if (size >= sizeof(serial_string))
+		return -EINVAL;
+	strlcpy(serial_string, buff, sizeof(serial_string));
+	strim(serial_string);
+	strlcpy(kc_serial_string, serial_string, sizeof(kc_serial_string));
+	if (android_connect_flag == 1) {
+		android_connect_flag = 0;
+		android_enable(dev);
+		dev->enabled = true;
+	}
+
+	return size;
+}
+
+int android_get_otg_volt_string(void)
+{
+	int ret = 1;
+	if (strcmp(otg_volt_string, "0") == 0) {
+		ret = 0;
+	}
+	pr_debug("android_get_otg_volt_string str=%s ret=%d\n",otg_volt_string,ret);
+	return ret;
+}
+
+static ssize_t otg_volt_show(struct device *pdev, struct device_attribute *attr,
+			   char *buf)
+{
+	pr_debug("otg_volt_show str=%s\n",otg_volt_string);
+	return snprintf(buf, PAGE_SIZE, "%s\n", otg_volt_string);
+}
+
+extern void msm_otg_volt_stop(void);
+static ssize_t otg_volt_store(struct device *pdev,
+		struct device_attribute *attr, const char *buff, size_t size)
+{
+	char otg_volt_string_w[8]="1";
+
+	pr_debug("otg_volt_store Param:%s size:%d\n",buff,(int)size);
+	if (size > 8) {
+		pr_err("otg_volt_store size over\n");
+		return -EINVAL;
+	}
+	sscanf(buff, "%s", otg_volt_string_w);
+	if ((strcmp(otg_volt_string_w, "0") != 0) && (strcmp(otg_volt_string_w, "1") != 0)) {
+		pr_err("otg_volt_store Parameter error %s\n",buff);
+		return -EINVAL;
+	}
+
+	pr_debug("otg_volt_store update %s->%s",otg_volt_string,otg_volt_string_w);
+	strlcpy(otg_volt_string, otg_volt_string_w, sizeof(otg_volt_string));
+
+	if (strcmp(otg_volt_string, "0") == 0) {
+		pr_debug("otg_volt_store msm_otg_volt_stop call\n");
+		/* power not supply */
+		msm_otg_volt_stop();
+	}
+	else if (strcmp(otg_volt_string, "1") == 0) {
+		pr_debug("otg_volt_store not action\n");
+		/* power supply */
+	}
+
+	return size;
+}
+
+int android_get_otg_volt_wait_string(void)
+{
+	int ret = 0;
+	if (strcmp(otg_volt_wait_string, "1") == 0) {
+		ret = 1;
+	}
+	pr_debug("otg_volt_wait_string str=%s ret=%d\n",otg_volt_wait_string,ret);
+	return ret;
+}
+
+int android_set_otg_volt_wait_string(int val)
+{
+	int ret = 0;
+
+	pr_debug("android_set_otg_volt_wait_string val=%d\n",val);
+	switch(val) {
+	case 0:
+		otg_volt_wait_string[0] = '0';
+		break;
+	case 1:
+		otg_volt_wait_string[0] = '1';
+		break;
+	default:
+		pr_err("android_set_otg_volt_wait_string parm err %d\n",val);
+		ret = -1;
+		break;
+	}
+	return ret;
+}
+
+static ssize_t otg_volt_wait_show(struct device *pdev, struct device_attribute *attr,
+			   char *buf)
+{
+	pr_debug("otg_volt_wait_show str=%s\n",otg_volt_wait_string);
+	return snprintf(buf, PAGE_SIZE, "%s\n", otg_volt_wait_string);
+}
+
+void msm_otg_volt_wakeup(void);
+static ssize_t otg_volt_wait_store(struct device *pdev,
+		struct device_attribute *attr, const char *buff, size_t size)
+{
+	char otg_voltt_wait_string_w[8]="0";
+
+	pr_debug("otg_volt_wait_store Param:%s size:%d\n",buff,(int)size);
+	if (size > 8) {
+		pr_err("otg_volt_wait_store size over\n");
+		return -EINVAL;
+	}
+	sscanf(buff, "%s", otg_voltt_wait_string_w);
+	if ((strcmp(otg_voltt_wait_string_w, "0") != 0) && (strcmp(otg_voltt_wait_string_w, "1") != 0)) {
+		pr_err("otg_volt_wait_store Parameter error %s\n",buff);
+		return -EINVAL;
+	}
+
+	pr_debug("otg_volt_wait_store update %s->%s",otg_volt_wait_string,otg_voltt_wait_string_w);
+	strlcpy(otg_volt_wait_string, otg_voltt_wait_string_w, sizeof(otg_volt_wait_string));
+
+	if (strcmp(otg_volt_wait_string, "0") == 0) {
+		pr_debug("otg_volt_wait_store not action\n");
+		/* power not supply */
+	}
+	else if (strcmp(otg_volt_wait_string, "1") == 0) {
+		pr_debug("otg_volt_wait_store msm_otg_volt_stop call\n");
+		msm_otg_volt_wakeup();
+		/* power supply */
+	}
+
+	return size;
+}
+
+static DEVICE_ATTR(iSerial, S_IRUGO | S_IWUSR, serial_show, serial_store);
 static DEVICE_ATTR(functions, S_IRUGO | S_IWUSR, functions_show,
 						 functions_store);
 static DEVICE_ATTR(enable, S_IRUGO | S_IWUSR, enable_show, enable_store);
@@ -2271,6 +2669,10 @@ static DEVICE_ATTR(pm_qos, S_IRUGO | S_IWUSR,
 static DEVICE_ATTR(state, S_IRUGO, state_show, NULL);
 static DEVICE_ATTR(remote_wakeup, S_IRUGO | S_IWUSR,
 		remote_wakeup_show, remote_wakeup_store);
+static DEVICE_ATTR(factory, S_IRUGO | S_IWUSR, factory_show, factory_store);
+
+static DEVICE_ATTR(otg_volt, S_IRUGO | S_IWUSR, otg_volt_show, otg_volt_store);
+static DEVICE_ATTR(otg_volt_wait, S_IRUGO | S_IWUSR, otg_volt_wait_show, otg_volt_wait_store);
 
 static struct device_attribute *android_usb_attributes[] = {
 	&dev_attr_idVendor,
@@ -2287,6 +2689,9 @@ static struct device_attribute *android_usb_attributes[] = {
 	&dev_attr_pm_qos,
 	&dev_attr_state,
 	&dev_attr_remote_wakeup,
+	&dev_attr_factory,
+	&dev_attr_otg_volt,
+	&dev_attr_otg_volt_wait,
 	NULL
 };
 
@@ -2312,12 +2717,50 @@ static void android_unbind_config(struct usb_configuration *c)
 	android_unbind_enabled_functions(dev, c);
 }
 
+static void android_boot_work(struct work_struct *data)
+{
+#if 0
+	struct android_dev *dev = container_of(data, struct android_dev, work2);
+	struct usb_composite_dev *cdev = dev->cdev;
+	int i;
+	int err;
+
+	err = android_enable_function(dev, "diag");
+	if (err) pr_err("android_usb: Cannot enable '%s'", "diag");
+	err = android_enable_function(dev, "serial");
+	if (err) pr_err("android_usb: Cannot enable '%s'", "serial");
+
+	cdev->desc.idVendor = device_desc.idVendor = 0x0482;
+	cdev->desc.idProduct = device_desc.idProduct = 0x0585;
+	cdev->desc.bcdDevice = device_desc.bcdDevice  = 0x0100;
+	cdev->desc.bDeviceClass = device_desc.bDeviceClass = 0x0000;
+	cdev->desc.bDeviceSubClass = device_desc.bDeviceSubClass = 0x0000;
+	cdev->desc.bDeviceProtocol = device_desc.bDeviceProtocol = 0x0000;
+	strlcpy(diag_clients, "diag", sizeof("diag"));
+	strlcpy(serial_transports, "smd", sizeof("smd"));
+	for (i = 0 ; i < 5 ; i++) {
+		err = usb_add_config(cdev, &android_config_driver,
+						android_bind_config);
+		if(err == 0)
+			break;
+		msleep(10);
+	}
+	if (err < 0)
+		return;
+	usb_gadget_connect(cdev->gadget);
+	dev->enabled = true;
+#endif
+
+	return;
+}
+
 static int android_bind(struct usb_composite_dev *cdev)
 {
 	struct android_dev *dev;
 	struct usb_gadget	*gadget = cdev->gadget;
 	struct android_configuration *conf;
 	int			gcnum, id, ret;
+	static char *factory_smem = NULL;
 
 	/* Bind to the last android_dev that was probed */
 	dev = list_entry(android_dev_list.prev, struct android_dev, list_item);
@@ -2357,6 +2800,7 @@ static int android_bind(struct usb_composite_dev *cdev)
 		sizeof(manufacturer_string) - 1);
 	strlcpy(product_string, "Android", sizeof(product_string) - 1);
 	strlcpy(serial_string, "0123456789ABCDEF", sizeof(serial_string) - 1);
+	strlcpy(kc_serial_string, "0123456789ABCDEF", sizeof(kc_serial_string) - 1);
 
 	id = usb_string_id(cdev);
 	if (id < 0)
@@ -2376,7 +2820,16 @@ static int android_bind(struct usb_composite_dev *cdev)
 			longname, gadget->name);
 		device_desc.bcdDevice = __constant_cpu_to_le16(0x9999);
 	}
+	device_desc.bcdDevice = cpu_to_le16(0x0100);
 
+	dev->cdev = cdev;
+
+	factory_smem = (char*)kc_smem_alloc(SMEM_FACTORY_USB, 8);
+	strcpy(factory_string, (factory_smem) ? :"normal");
+
+	if(!strcmp(factory_string, "fact1")) {
+		schedule_work(&dev->work2);
+	}
 	return 0;
 }
 
@@ -2387,7 +2840,9 @@ static int android_usb_unbind(struct usb_composite_dev *cdev)
 	manufacturer_string[0] = '\0';
 	product_string[0] = '\0';
 	serial_string[0] = '0';
+	kc_serial_string[0] = '0';
 	cancel_work_sync(&dev->work);
+	cancel_work_sync(&dev->work2);
 	android_cleanup_functions(dev->functions);
 	return 0;
 }
@@ -2576,6 +3031,7 @@ static int __devinit android_probe(struct platform_device *pdev)
 	android_dev->configs_num = 0;
 	INIT_LIST_HEAD(&android_dev->configs);
 	INIT_WORK(&android_dev->work, android_work);
+	INIT_WORK(&android_dev->work2, android_boot_work);
 	mutex_init(&android_dev->mutex);
 
 	android_dev->pdata = pdata;
@@ -2683,6 +3139,9 @@ static int __init init(void)
 
 	INIT_LIST_HEAD(&android_dev_list);
 	android_dev_count = 0;
+	android_connect_flag = 0;
+	otg_volt_string[0] = '1';
+	android_set_otg_volt_wait_string(0);
 
 	ret = platform_driver_register(&android_platform_driver);
 	if (ret) {

@@ -169,7 +169,9 @@ struct pm8921_charger_platform_data {
 	unsigned int			(*get_batt_capacity_percent) (void);
 	int64_t				batt_id_min;
 	int64_t				batt_id_max;
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	bool				keep_btm_on_suspend;
+#endif
 	bool				has_dc_supply;
 	int				trkl_voltage;
 	int				weak_voltage;
@@ -316,6 +318,11 @@ int pm8921_usb_ovp_disable(int disable);
  * batfet this will return 0.
  */
 int pm8921_is_batfet_closed(void);
+/**
+ * pm8921_get_chg_vddmax - get vddmax settings
+ *
+ */
+int pm8921_get_chg_vddmax(int *voltage);
 #else
 static inline void pm8921_charger_vbus_draw(unsigned int mA)
 {
@@ -387,6 +394,10 @@ static inline int pm8921_usb_ovp_disable(int disable)
 static inline int pm8921_is_batfet_closed(void)
 {
 	return 1;
+}
+static inline int pm8921_get_chg_vddmax(int *voltage);
+{
+	return -ENXIO;
 }
 #endif
 

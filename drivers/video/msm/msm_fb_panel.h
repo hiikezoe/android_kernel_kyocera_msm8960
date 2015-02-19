@@ -16,6 +16,8 @@
 
 #include "msm_fb_def.h"
 
+#define DISPLAY_KC_START_UP
+
 struct msm_fb_data_type;
 
 typedef void (*msm_fb_vsync_handler_type) (void *arg);
@@ -55,6 +57,17 @@ typedef enum {
 	DISPLAY_3,              /* attached on third writeback device */
 	MAX_PHYS_TARGET_NUM,
 } DISP_TARGET_PHYS;
+
+#define FEATURE_DISP_LOCAL_LOG
+/* #undef FEATURE_DISP_LOCAL_LOG */
+extern uint8_t fb_dbg_msg_level;
+#ifdef FEATURE_DISP_LOCAL_LOG
+  #define DISP_LOCAL_LOG_EMERG(msg, ...)    \
+          if(fb_dbg_msg_level>0) printk(KERN_EMERG msg, ## __VA_ARGS__);
+#else
+  #define DISP_LOCAL_LOG_EMERG(msg, ...)    \
+  (void)0;
+#endif
 
 /* panel info type */
 struct lcd_panel_info {
@@ -197,6 +210,12 @@ struct msm_fb_panel_data {
 	void (*set_vsync_notifier) (msm_fb_vsync_handler_type, void *arg);
 	void (*set_backlight) (struct msm_fb_data_type *);
 	int (*get_backlight_on_status) (void);
+#ifdef CONFIG_DISP_EXT_PROPERTY
+	void (*set_nv) ( struct fb_kcjprop_data* kcjprop_data );
+#endif /* CONFIG_DISP_EXT_PROPERTY */
+#ifdef CONFIG_DISP_EXT_REFRESH
+	void (*refresh) ( struct msm_fb_data_type *mfd, unsigned int cmd );
+#endif /* CONFIG_DISP_EXT_REFRESH */
 
 	/* function entry chain */
 	int (*on) (struct platform_device *pdev);

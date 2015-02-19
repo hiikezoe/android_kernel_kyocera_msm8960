@@ -34,6 +34,7 @@
 #include "mdp.h"
 #include "msm_fb.h"
 #include "mddihost.h"
+#include "disp_ext.h"
 
 #ifdef CONFIG_FB_MSM_MDP40
 #include "mdp4.h"
@@ -61,8 +62,13 @@ extern int lcdc_mode;
 extern int vsync_mode;
 
 #ifdef MDP_HW_VSYNC
+#ifdef CONFIG_DISP_EXT_UTIL_VSYNC
+int vsync_above_th = 0;
+int vsync_start_th = 100;
+#else
 int vsync_above_th = 4;
 int vsync_start_th = 1;
+#endif /*CONFIG_DISP_EXT_UTIL_VSYNC*/
 int vsync_load_cnt;
 int vsync_clk_status;
 DEFINE_MUTEX(vsync_clk_lock);
@@ -73,6 +79,9 @@ static struct msm_fb_data_type *vsync_mfd;
 static unsigned char timer_shutdown_flag;
 static uint32 vsync_cnt_cfg;
 
+#ifdef CONFIG_DISP_EXT_REFRESH
+static struct msm_fb_data_type *mdp_vsync_mfd;
+#endif /* CONFIG_DISP_EXT_REFRESH */
 
 void vsync_clk_prepare_enable(void)
 {
@@ -224,10 +233,14 @@ static void mdp_set_sync_cfg_0(struct msm_fb_data_type *mfd, int vsync_cnt)
 {
 	unsigned long cfg;
 
+#ifdef CONFIG_DISP_EXT_UTIL_VSYNC
+	cfg = disp_ext_util_get_total_line();
+#else
 	if (mfd->panel_info.lcd.total_lines)
 		cfg = mfd->panel_info.lcd.total_lines;
 	else
 		cfg = mfd->total_lcd_lines - 1;
+#endif /*CONFIG_DISP_EXT_UTIL_VSYNC*/
 
 	cfg <<= MDP_SYNCFG_HGT_LOC;
 	if (mfd->panel_info.lcd.hw_vsync_mode)
@@ -242,10 +255,14 @@ static void mdp_set_sync_cfg_1(struct msm_fb_data_type *mfd, int vsync_cnt)
 {
 	unsigned long cfg;
 
+#ifdef CONFIG_DISP_EXT_UTIL_VSYNC
+	cfg = disp_ext_util_get_total_line();
+#else
 	if (mfd->panel_info.lcd.total_lines)
 		cfg = mfd->panel_info.lcd.total_lines;
 	else
 		cfg = mfd->total_lcd_lines - 1;
+#endif /*CONFIG_DISP_EXT_UTIL_VSYNC*/
 
 	cfg <<= MDP_SYNCFG_HGT_LOC;
 	if (mfd->panel_info.lcd.hw_vsync_mode)
@@ -321,6 +338,10 @@ void mdp_config_vsync(struct platform_device *pdev,
 		goto err_handle;
 	}
 
+#ifdef CONFIG_DISP_EXT_REFRESH
+	mdp_vsync_mfd = mfd;
+#endif /* CONFIG_DISP_EXT_REFRESH */
+
 	vsync_clk_status = 0;
 	if (mfd->panel_info.lcd.vsync_enable) {
 		mfd->total_porch_lines = mfd->panel_info.lcd.v_back_porch +
@@ -360,9 +381,13 @@ void mdp_config_vsync(struct platform_device *pdev,
 				vsync_cnt_cfg_dem =
 				    (mfd->panel_info.lcd.refx100 *
 				     mfd->total_lcd_lines) / 100;
+#ifdef CONFIG_DISP_EXT_UTIL_VSYNC
+				vsync_cnt_cfg = disp_ext_util_get_vsync_count();
+#else
 				vsync_cnt_cfg =
 				    (mdp_vsync_clk_speed_hz) /
 				    vsync_cnt_cfg_dem;
+#endif /*CONFIG_DISP_EXT_UTIL_VSYNC*/
 				mdp_vsync_cfg_regs(mfd, TRUE);
 			}
 		}
@@ -510,3 +535,25 @@ uint32 mdp_get_lcd_line_counter(struct msm_fb_data_type *mfd)
 
 	return lcd_line;
 }
+#ifdef CONFIG_DISP_EXT_REFRESH
+void mdp_hw_vsync_irq_reg(void)
+{
+	u32 vsync_gpio;
+	int ret = 0;
+
+    DISP_LOCAL_LOG_EMERG("DISP %s S\n",__func__);
+	if( mdp_vsync_mfd == NULL ) {
+		pr_debug("%s:bot found device\n", __func__);
+        DISP_LOCAL_LOG_EMERG("DISP %s err1\n",__func__);
+		return;
+	}
+
+	vsync_gpio = mdp_vsync_mfd->vsync_gpio;
+	mdp_vsync_mfd->channel_irq = MSM_GPIO_TO_INT(vsync_gpio);
+	ret = request_irq(mdp_vsync_mfd->channel_irq,
+					&disp_ext_refresh_hw_vsync_irq,
+					IRQF_TRIGGER_FALLING, "VSYNC_GPIO",
+					(void *)mdp_vsync_mfd);
+    DISP_LOCAL_LOG_EMERG("DISP %s E\n",__func__);
+}
+#endif /* CONFIG_DISP_EXT_REFRESH */

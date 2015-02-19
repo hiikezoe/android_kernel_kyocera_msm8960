@@ -175,6 +175,8 @@ struct tabla_mbhc_config {
 	unsigned int mclk_rate;
 	unsigned int gpio;
 	unsigned int gpio_irq;
+	unsigned int sw_gpio;
+	unsigned int sw_gpio_irq;
 	int gpio_level_insert;
 	bool detect_extn_cable;
 	/* swap_gnd_mic returns true if extern GND/MIC swap switch toggled */
@@ -250,5 +252,10 @@ extern void *tabla_mbhc_cal_btn_det_mp(const struct tabla_mbhc_btn_detect_cfg
 	    sizeof(struct tabla_mbhc_imped_detect_cfg) + \
 	    (cfg_ptr->_n_rload * (sizeof(cfg_ptr->_rload[0]) + \
 				 sizeof(cfg_ptr->_alpha[0]))))
+
+#define TABLA_HS_SW_GPIO 49
+
+extern int tabla_kc_hs_detect(struct snd_soc_codec *codec,
+			   const struct tabla_mbhc_config *cfg);
 
 

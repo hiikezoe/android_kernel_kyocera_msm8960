@@ -59,12 +59,18 @@ struct msm_camera_i2c_enum_conf_array {
 int32_t msm_camera_i2c_rxdata(struct msm_camera_i2c_client *client,
 	unsigned char *rxdata, int data_length);
 
+int32_t msm_camera_i2c_rxdata_act(struct msm_camera_i2c_client *client,
+	unsigned char *rxdata, int data_length);
+
 int32_t msm_camera_i2c_txdata(struct msm_camera_i2c_client *client,
 	unsigned char *txdata, int length);
 
 int32_t msm_camera_i2c_read(struct msm_camera_i2c_client *client,
 	uint16_t addr, uint16_t *data,
 	enum msm_camera_i2c_data_type data_type);
+
+int32_t msm_camera_i2c_read_act(struct msm_camera_i2c_client *client,
+	uint16_t *data,	enum msm_camera_i2c_data_type data_type);
 
 int32_t msm_camera_i2c_read_seq(struct msm_camera_i2c_client *client,
 	uint16_t addr, uint8_t *data, uint16_t num_byte);

@@ -46,6 +46,12 @@
 #define PON_CTRL_4_RESET_EN_MASK		0x01
 #define PON_CTRL_4_SHUTDOWN_ON_RESET		0x0
 #define PON_CTRL_4_RESTART_ON_RESET		0x1
+
+#define PON_CTRL_4_RESET_DELAY_MASK		0x0E
+#define PON_CTRL_4_RESET_DELAY_SHIFT		1
+#define PON_CTRL_4_RESET_DEBOUNCE_MASK		0xF0
+#define PON_CTRL_4_RESET_DEBOUNCE_SHIFT		4
+
 #define PON_CTRL_5_HARD_RESET_EN_MASK		0x08
 #define PON_CTRL_5_HARD_RESET_EN		0x08
 #define PON_CTRL_5_HARD_RESET_DIS		0x00
@@ -943,6 +949,137 @@ int pm8xxx_hard_reset_config(enum pm8xxx_pon_config config)
 	return rc;
 }
 EXPORT_SYMBOL(pm8xxx_hard_reset_config);
+
+static int
+__kc_pm8xxx_hard_reset_config(struct pm8xxx_misc_chip *chip,
+	struct kc_pm8xxx_hard_reset_config *config, u16 pon4_addr, u16 pon5_addr)
+{
+	int rc = 0;
+	u8 data = 0;
+
+	if (config->enable > PM8XXX_RESTART_ON_HARD_RESET)
+		return -EINVAL;
+	if (config->delay > PM8XXX_HARD_RESET_DELAY_2000_MSEC)
+		return -EINVAL;
+	if (config->debounce > PM8XXX_HARD_RESET_DEBOUNCE_10256_MSEC)
+		return -EINVAL;
+
+	data |= (config->delay << PON_CTRL_4_RESET_DELAY_SHIFT)
+					& PON_CTRL_4_RESET_DELAY_MASK;
+
+	data |= (config->debounce << PON_CTRL_4_RESET_DEBOUNCE_SHIFT)
+					& PON_CTRL_4_RESET_DEBOUNCE_MASK;
+
+	switch (config->enable) {
+	case PM8XXX_DISABLE_HARD_RESET:
+		rc = pm8xxx_misc_masked_write(chip, pon5_addr,
+				PON_CTRL_5_HARD_RESET_EN_MASK,
+				PON_CTRL_5_HARD_RESET_DIS);
+		break;
+	case PM8XXX_SHUTDOWN_ON_HARD_RESET:
+		rc = pm8xxx_misc_masked_write(chip, pon5_addr,
+				PON_CTRL_5_HARD_RESET_EN_MASK,
+				PON_CTRL_5_HARD_RESET_EN);
+		if (!rc) {
+			data |= PON_CTRL_4_SHUTDOWN_ON_RESET;
+			pm8xxx_writeb(chip->dev->parent, pon4_addr, data);
+		}
+		break;
+	case PM8XXX_RESTART_ON_HARD_RESET:
+		rc = pm8xxx_misc_masked_write(chip, pon5_addr,
+				PON_CTRL_5_HARD_RESET_EN_MASK,
+				PON_CTRL_5_HARD_RESET_EN);
+		if (!rc) {
+			data |= PON_CTRL_4_RESTART_ON_RESET;
+			pm8xxx_writeb(chip->dev->parent, pon4_addr, data);
+		}
+		break;
+	default:
+		rc = -EINVAL;
+		break;
+	}
+
+	return rc;
+}
+
+/**
+ * kc_pm8xxx_hard_reset_config - Allows different reset configurations
+ *
+ * enable = PM8XXX_DISABLE_HARD_RESET to disable hard reset
+ *	  = PM8XXX_SHUTDOWN_ON_HARD_RESET to turn off the system on hard reset
+ *	  = PM8XXX_RESTART_ON_HARD_RESET to restart the system on hard reset
+ *
+ * delay  = PM8XXX_HARD_RESET_DELAY_0_MSEC to set delay_timer 0 msec.
+ *	  = PM8XXX_HARD_RESET_DELAY_10_MSEC to set delay_timer 10 msec.
+ *	  = PM8XXX_HARD_RESET_DELAY_50_MSEC to set delay_timer 50 msec.
+ *	  = PM8XXX_HARD_RESET_DELAY_100_MSEC to set delay_timer 100 msec.
+ *	  = PM8XXX_HARD_RESET_DELAY_250_MSEC to set delay_timer 250 msec.
+ *	  = PM8XXX_HARD_RESET_DELAY_500_MSEC to set delay_timer 500 msec.
+ *	  = PM8XXX_HARD_RESET_DELAY_1000_MSEC to set delay_timer 1000 msec.
+ *        = PM8XXX_HARD_RESET_DELAY_2000_MSEC to set delay_timer 2000 msec.
+ *
+ * debounce = PM8XXX_HARD_RESET_DEBOUNCE_0_MSEC to set debounce 0 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_32_MSEC to set debounce 32 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_56_MSEC to set debounce 56 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_80_MSEC to set debounce 80 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_128_MSEC to set debounce 128 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_184_MSEC to set debounce 184 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_272_MSEC to set debounce 272 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_408_MSEC to set debounce 408 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_608_MSEC to set debounce 608 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_904_MSEC to set debounce 904 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_1352_MSEC to set debounce 1352 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_2048_MSEC to set debounce 2048 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_3072_MSEC to set debounce 3072 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_4480_MSEC to set debounce 4480 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_6720_MSEC to set debounce 6720 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_10256_MSEC to set debounce 10256 msec.
+ *
+ * RETURNS: an appropriate -ERRNO error value on error, or zero for success.
+ */
+int kc_pm8xxx_hard_reset_config(struct kc_pm8xxx_hard_reset_config *config)
+{
+	struct pm8xxx_misc_chip *chip;
+	unsigned long flags;
+	int rc = 0;
+
+	spin_lock_irqsave(&pm8xxx_misc_chips_lock, flags);
+
+	/* Loop over all attached PMICs and call specific functions for them. */
+	list_for_each_entry(chip, &pm8xxx_misc_chips, link) {
+		switch (chip->version) {
+		case PM8XXX_VERSION_8018:
+			__kc_pm8xxx_hard_reset_config(chip, config,
+				REG_PM8018_PON_CNTL_4, REG_PM8018_PON_CNTL_5);
+			break;
+		case PM8XXX_VERSION_8058:
+			__kc_pm8xxx_hard_reset_config(chip, config,
+				REG_PM8058_PON_CNTL_4, REG_PM8058_PON_CNTL_5);
+			break;
+		case PM8XXX_VERSION_8901:
+			__kc_pm8xxx_hard_reset_config(chip, config,
+				REG_PM8901_PON_CNTL_4, REG_PM8901_PON_CNTL_5);
+			break;
+		case PM8XXX_VERSION_8921:
+		case PM8XXX_VERSION_8917:
+			__kc_pm8xxx_hard_reset_config(chip, config,
+				REG_PM8921_PON_CNTL_4, REG_PM8921_PON_CNTL_5);
+			break;
+		default:
+			/* hard reset config. no supported */
+			break;
+		}
+		if (rc) {
+			pr_err("hard reset config. failed, rc=%d\n", rc);
+			break;
+		}
+	}
+
+	spin_unlock_irqrestore(&pm8xxx_misc_chips_lock, flags);
+
+	return rc;
+}
+EXPORT_SYMBOL(kc_pm8xxx_hard_reset_config);
 
 /* Handle the OSC_HALT interrupt: 32 kHz XTAL oscillator has stopped. */
 static irqreturn_t pm8xxx_osc_halt_isr(int irq, void *data)

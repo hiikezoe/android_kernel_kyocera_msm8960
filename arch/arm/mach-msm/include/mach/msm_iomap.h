@@ -102,6 +102,9 @@
 #define MSM8625_SECONDARY_PHYS		0x0FE00000
 
 
+#define MSM_UNINIT_RAM_BASE IOMEM(0xFA900000)   /*  5M  */
+#define MSM_UNINIT_RAM_SIZE (SZ_1M * 5)         /*  5M  */
+
 #if defined(CONFIG_ARCH_MSM9615) || defined(CONFIG_ARCH_MSM7X27) \
 	|| defined(CONFIG_ARCH_MSM7X30)
 #define MSM_SHARED_RAM_SIZE	SZ_1M

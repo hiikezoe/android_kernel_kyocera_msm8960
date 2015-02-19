@@ -62,6 +62,7 @@ static int snd_jack_dev_register(struct snd_device *device)
 	struct snd_jack *jack = device->device_data;
 	struct snd_card *card = device->card;
 	int err, i;
+	int button_mask = 0;
 
 	snprintf(jack->name, sizeof(jack->name), "%s %s",
 		 card->shortname, jack->id);
@@ -74,6 +75,7 @@ static int snd_jack_dev_register(struct snd_device *device)
 	/* Add capabilities for any keys that are enabled */
 	for (i = 0; i < ARRAY_SIZE(jack->key); i++) {
 		int testbit = SND_JACK_BTN_0 >> i;
+		button_mask |= testbit;
 
 		if (!(jack->type & testbit))
 			continue;
@@ -83,6 +85,9 @@ static int snd_jack_dev_register(struct snd_device *device)
 
 		input_set_capability(jack->input_dev, EV_KEY, jack->key[i]);
 	}
+
+	if((jack->type & button_mask) != 0)
+		input_set_capability(jack->input_dev, EV_KEY, KEY_MEDIA);
 
 	err = input_register_device(jack->input_dev);
 	if (err == 0)
@@ -220,6 +225,7 @@ void snd_jack_report(struct snd_jack *jack, int status)
 	if (!jack)
 		return;
 
+#if 0
 	for (i = 0; i < ARRAY_SIZE(jack->key); i++) {
 		int testbit = SND_JACK_BTN_0 >> i;
 
@@ -227,6 +233,13 @@ void snd_jack_report(struct snd_jack *jack, int status)
 			input_report_key(jack->input_dev, jack->key[i],
 					 status & testbit);
 	}
+#else
+	if(jack->type & SND_JACK_BTN_0)
+	{
+		input_report_key(jack->input_dev, KEY_MEDIA,
+					 	 status & SND_JACK_BTN_0);
+	}
+#endif
 
 	for (i = 0; i < ARRAY_SIZE(jack_switch_types); i++) {
 		int testbit = 1 << i;

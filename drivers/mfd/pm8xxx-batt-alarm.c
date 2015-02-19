@@ -24,6 +24,7 @@
 #include <linux/slab.h>
 #include <linux/mfd/pm8xxx/core.h>
 #include <linux/mfd/pm8xxx/batt-alarm.h>
+#include <linux/mfd/pm8xxx/pm8921-bms.h>
 
 /* Available voltage threshold values */
 #define THRESHOLD_MIN_MV		2500
@@ -95,14 +96,21 @@
  * are disabled by default and must be turned on by calling
  * pm8xxx_batt_alarm_state_set.
  */
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 #define DEFAULT_THRESHOLD_LOWER		3200
 #define DEFAULT_THRESHOLD_UPPER		4300
+#else
+#define DEFAULT_THRESHOLD_LOWER		3450
+#define DEFAULT_THRESHOLD_UPPER		5600
+#endif
 #define DEFAULT_HOLD_TIME		PM8XXX_BATT_ALARM_HOLD_TIME_16_MS
 #define DEFAULT_USE_PWM			1
 #define DEFAULT_PWM_SCALER		9
 #define DEFAULT_PWM_DIVIDER		8
 #define DEFAULT_LOWER_ENABLE		0
 #define DEFAULT_UPPER_ENABLE		0
+
+static int target_vol = 0;
 
 struct pm8xxx_batt_alarm_chip {
 	struct pm8xxx_batt_alarm_core_data	cdata;
@@ -513,6 +521,10 @@ static void pm8xxx_batt_alarm_isr_work(struct work_struct *work)
 		srcu_notifier_call_chain(&chip->irq_notifier_list,
 						status, NULL);
 
+	if (status == PM8XXX_BATT_ALARM_STATUS_BELOW_LOWER) {
+		oem_pm8921_bms_detected_low_vol(target_vol);
+	}
+
 	enable_irq(chip->irq);
 }
 
@@ -623,6 +635,27 @@ bail:
 	return rc;
 }
 
+int oem_pm8xxx_batt_alarm_threshold_update(int threshold_low_vol)
+{
+	int rc = 0;
+
+	target_vol = threshold_low_vol;
+	rc = pm8xxx_batt_alarm_threshold_set(PM8XXX_BATT_ALARM_LOWER_COMPARATOR,
+		threshold_low_vol);
+	if (rc) {
+		pr_err("threshold_set failed, rc=%d\n", rc);
+	}
+
+	return rc;
+}
+EXPORT_SYMBOL(oem_pm8xxx_batt_alarm_threshold_update);
+
+int oem_pm8xxx_batt_alarm_get_threshold(void)
+{
+	return target_vol;
+}
+EXPORT_SYMBOL(oem_pm8xxx_batt_alarm_get_threshold);
+
 /* TODO: should this default setting function be removed? */
 static int pm8xxx_batt_alarm_config_defaults(void)
 {
@@ -656,6 +689,7 @@ static int pm8xxx_batt_alarm_config_defaults(void)
 		goto done;
 	}
 
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	rc = pm8xxx_batt_alarm_disable(PM8XXX_BATT_ALARM_LOWER_COMPARATOR);
 	if (rc) {
 		pr_err("disable lower failed, rc=%d\n", rc);
@@ -667,6 +701,19 @@ static int pm8xxx_batt_alarm_config_defaults(void)
 		pr_err("disable upper failed, rc=%d\n", rc);
 		goto done;
 	}
+#else
+	rc = pm8xxx_batt_alarm_enable(PM8XXX_BATT_ALARM_LOWER_COMPARATOR);
+	if (rc) {
+		pr_err("enable lower failed, rc=%d\n", rc);
+		goto done;
+	}
+
+	rc = pm8xxx_batt_alarm_enable(PM8XXX_BATT_ALARM_UPPER_COMPARATOR);
+	if (rc) {
+		pr_err("enable upper failed, rc=%d\n", rc);
+		goto done;
+	}
+#endif
 
 done:
 	return rc;
@@ -744,6 +791,8 @@ static int __devinit pm8xxx_batt_alarm_probe(struct platform_device *pdev)
 	/* Disable the IRQ until a notifier is registered. */
 	disable_irq(chip->irq);
 
+	target_vol = DEFAULT_THRESHOLD_LOWER;
+
 	platform_set_drvdata(pdev, chip);
 
 	return 0;
@@ -778,9 +827,29 @@ static int __devexit pm8xxx_batt_alarm_remove(struct platform_device *pdev)
 	return 0;
 }
 
+static int pm8xxx_batt_alarm_suspend(struct platform_device *pdev, pm_message_t state)
+{
+	struct pm8xxx_batt_alarm_chip *chip = platform_get_drvdata(pdev);
+	enable_irq_wake(chip->irq);
+	enable_irq(chip->irq);
+
+	return 0;
+}
+
+static int pm8xxx_batt_alarm_resume(struct platform_device *pdev)
+{
+	struct pm8xxx_batt_alarm_chip *chip = platform_get_drvdata(pdev);
+	disable_irq(chip->irq);
+	disable_irq_wake(chip->irq);
+
+	return 0;
+}
+
 static struct platform_driver pm8xxx_batt_alarm_driver = {
 	.probe	= pm8xxx_batt_alarm_probe,
 	.remove	= __devexit_p(pm8xxx_batt_alarm_remove),
+	.suspend = pm8xxx_batt_alarm_suspend,
+	.resume = pm8xxx_batt_alarm_resume,
 	.driver	= {
 		.name = PM8XXX_BATT_ALARM_DEV_NAME,
 		.owner = THIS_MODULE,

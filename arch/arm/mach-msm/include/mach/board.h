@@ -25,6 +25,7 @@
 #include <linux/clkdev.h>
 #include <linux/of_platform.h>
 #include <linux/msm_ssbi.h>
+#include <linux/i2c.h>
 #include <mach/msm_bus.h>
 
 struct msm_camera_io_ext {
@@ -525,7 +526,9 @@ struct msm_i2c_platform_data {
 	int src_clk_rate;
 	int use_gsbi_shared_mode;
 	int keep_ahb_clk_on;
+	uint32_t gsbi_protocol_code;
 	void (*msm_i2c_config_gpio)(int iface, int config_type);
+	void (*msm_i2c_init_device)(struct i2c_adapter *adap);
 };
 
 struct msm_i2c_ssbi_platform_data {

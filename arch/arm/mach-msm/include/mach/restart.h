@@ -16,6 +16,7 @@
 
 #define RESTART_NORMAL 0x0
 #define RESTART_DLOAD  0x1
+#define RESTART_OEM    0x2
 
 #if defined(CONFIG_LGE_CRASH_HANDLER)
 #define SUB_THD_F_PWR	0x0190

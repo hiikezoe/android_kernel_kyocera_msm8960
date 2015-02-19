@@ -156,6 +156,14 @@ struct msm_sensor_fn_t {
 	void (*sensor_adjust_frame_lines) (struct msm_sensor_ctrl_t *s_ctrl);
 	int32_t (*sensor_get_csi_params)(struct msm_sensor_ctrl_t *,
 		struct csi_lane_params_t *);
+	int32_t (*sensor_get_exposure_time) (struct msm_sensor_ctrl_t *, uint32_t *);
+	int32_t (*sensor_set_note_takepic) (struct msm_sensor_ctrl_t *);
+	int32_t (*sensor_get_is_flash) (struct msm_sensor_ctrl_t *, uint8_t *);
+	int32_t (*sensor_set_exposure_compensation) (struct msm_sensor_ctrl_t *, int8_t);
+	int32_t (*sensor_set_white_balance) (struct msm_sensor_ctrl_t *, int8_t);
+	int32_t (*sensor_set_effect) (struct msm_sensor_ctrl_t *, int8_t);
+	void (*sensor_get_frame_skip_flg) (struct msm_sensor_ctrl_t *, uint8_t *);
+	int32_t (*sensor_get_low_light_info) (struct msm_sensor_ctrl_t *, int32_t *);
 	int (*sensor_set_vision_mode)(struct msm_sensor_ctrl_t *s_ctrl,
 			int32_t vision_mode_enable);
 	int (*sensor_set_vision_ae_control)(

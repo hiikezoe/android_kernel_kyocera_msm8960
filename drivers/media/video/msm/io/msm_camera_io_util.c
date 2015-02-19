@@ -240,7 +240,7 @@ int msm_camera_config_vreg(struct device *dev, struct camera_vreg_t *cam_vreg,
 				if (curr_vreg->type == REG_LDO) {
 					if (curr_vreg->op_mode >= 0) {
 						regulator_set_optimum_mode(
-							reg_ptr[j], 0);
+							reg_ptr[j], curr_vreg->lp_mode);
 					}
 					regulator_set_voltage(
 						reg_ptr[j], 0, curr_vreg->

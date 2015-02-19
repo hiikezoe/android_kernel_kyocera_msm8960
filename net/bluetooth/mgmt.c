@@ -20,6 +20,10 @@
    COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS
    SOFTWARE IS DISCLAIMED.
 */
+/*====*====*====*====*====*====*====*====*====*====*====*====*====*====*====*
+This software is contributed or developed by KYOCERA Corporation.
+(C) 2013 KYOCERA Corporation
+*====*====*====*====*====*====*====*====*====*====*====*====*====*====*====*/
 
 /* Bluetooth HCI Management interface */
 
@@ -40,6 +44,8 @@
 #define SCAN_IDLE	0x00
 #define SCAN_LE		0x01
 #define SCAN_BR		0x02
+
+#define AVAIL_SCAN_COUNT(i)  ((i-1)*7)
 
 struct pending_cmd {
 	struct list_head list;
@@ -2330,9 +2336,9 @@ void mgmt_disco_le_timeout(unsigned long data)
 	/* re-start BR scan */
 		if (hdev->disco_state != SCAN_IDLE) {
 			struct hci_cp_inquiry cp = {{0x33, 0x8b, 0x9e}, 4, 0};
-			hdev->disco_int_phase *= 2;
+			hdev->disco_int_phase += 1;
 			hdev->disco_int_count = 0;
-			cp.num_rsp = (u8) hdev->disco_int_phase;
+			cp.num_rsp = (u8) AVAIL_SCAN_COUNT(hdev->disco_int_phase);
 			hci_send_cmd(hdev, HCI_OP_INQUIRY, sizeof(cp), &cp);
 			hdev->disco_state = SCAN_BR;
 		}
@@ -3327,19 +3333,20 @@ int mgmt_device_found(u16 index, bdaddr_t *bdaddr, u8 type, u8 le,
 
 	hdev->disco_int_count++;
 
-	if (hdev->disco_int_count >= hdev->disco_int_phase) {
+	if (hdev->disco_int_count >= AVAIL_SCAN_COUNT(hdev->disco_int_phase)) {
 		/* Inquiry scan for General Discovery LAP */
 		struct hci_cp_inquiry cp = {{0x33, 0x8b, 0x9e}, 4, 0};
 		struct hci_cp_le_set_scan_enable le_cp = {0, 0};
 
-		hdev->disco_int_phase *= 2;
+
 		hdev->disco_int_count = 0;
 		if (hdev->disco_state == SCAN_LE) {
 			/* cancel LE scan */
 			hci_send_cmd(hdev, HCI_OP_LE_SET_SCAN_ENABLE,
 					sizeof(le_cp), &le_cp);
 			/* start BR scan */
-			cp.num_rsp = (u8) hdev->disco_int_phase;
+			hdev->disco_int_phase += 1;
+			cp.num_rsp = (u8) AVAIL_SCAN_COUNT(hdev->disco_int_phase);
 			hci_send_cmd(hdev, HCI_OP_INQUIRY,
 					sizeof(cp), &cp);
 			hdev->disco_state = SCAN_BR;

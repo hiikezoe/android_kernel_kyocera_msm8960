@@ -74,6 +74,7 @@ enum {
 
 extern struct sx150x_platform_data msm8960_sx150x_data[];
 extern struct msm_camera_board_info msm8960_camera_board_info;
+extern struct msm_camera_sensor_info msm_camera_sensor_rj6cba100_data;
 
 void msm8960_init_cam(void);
 void msm8960_init_fb(void);

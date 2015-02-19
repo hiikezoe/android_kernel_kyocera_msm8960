@@ -42,7 +42,30 @@ static cputime64_t get_iowait_time(int cpu)
 }
 
 #else
+#ifdef CONFIG_ARCH_MSM8960
+static u64 get_total_time(int cpu)
+{
+	return (kcpustat_cpu(cpu).cpustat[CPUTIME_USER]
+		+ kcpustat_cpu(cpu).cpustat[CPUTIME_NICE]
+		+ kcpustat_cpu(cpu).cpustat[CPUTIME_SYSTEM]
+		+ kcpustat_cpu(cpu).cpustat[CPUTIME_IDLE]
+		+ kcpustat_cpu(cpu).cpustat[CPUTIME_IOWAIT]
+		+ kcpustat_cpu(cpu).cpustat[CPUTIME_IRQ]);
+}
+static u64 get_idle_time(int cpu)
+{
+	if (cpu == 0)
+		return kcpustat_cpu(cpu).cpustat[CPUTIME_IDLE];
 
+	return (get_total_time(0)
+		- get_total_time(cpu)
+		+ kcpustat_cpu(cpu).cpustat[CPUTIME_IDLE]);
+}
+static u64 get_iowait_time(int cpu)
+{
+	return kcpustat_cpu(cpu).cpustat[CPUTIME_IOWAIT];
+}
+#else
 static u64 get_idle_time(int cpu)
 {
 	u64 idle, idle_time = -1ULL;
@@ -76,7 +99,7 @@ static u64 get_iowait_time(int cpu)
 }
 
 #endif
-
+#endif
 static int show_stat(struct seq_file *p, void *v)
 {
 	int i, j;

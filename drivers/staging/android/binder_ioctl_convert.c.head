@@ -1,0 +1,9 @@
+#include <linux/types.h>
+#include "binder.h"
+
+struct binder_ioctl_cvt {
+	int cmd;
+	const char *cmdname;
+};
+
+static const struct binder_ioctl_cvt binder_ioctl_cvttbl[] = {

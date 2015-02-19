@@ -294,8 +294,19 @@
 #include <linux/usb/gadget.h>
 #include <linux/usb/composite.h>
 
+#include <linux/switch.h>
+
 #include "gadget_chips.h"
 
+#include <linux/miscdevice.h>
+#include <asm/uaccess.h>
+#include <linux/errno.h>
+#include <linux/ioctl.h>
+#include <linux/module.h>
+#include <linux/poll.h>
+#include <linux/wait.h>
+#include <linux/sched.h>
+#include <linux/usb/f_mass_ioctl.h>
 
 /*------------------------------------------------------------------------*/
 
@@ -304,9 +315,13 @@
 
 static const char fsg_string_interface[] = "Mass Storage";
 
+#define KC_VENDOR_NAME		"change_mode"
+
 #define FSG_NO_DEVICE_STRINGS    1
 #define FSG_NO_OTG               1
 #define FSG_NO_INTR_EP           1
+
+#define FSYNC_CYCLE_MAX        64
 
 #include "storage_common.c"
 
@@ -318,7 +333,7 @@ static int csw_hack_sent;
 
 struct fsg_dev;
 struct fsg_common;
-
+struct unq_vendor_info;
 /* FSF callback functions */
 struct fsg_operations {
 	/*
@@ -408,6 +423,13 @@ struct fsg_common {
 	char inquiry_string[8 + 16 + 4 + 1];
 
 	struct kref		ref;
+	/* vendor_cmd (1 char), vendor_data (16 chars) */
+	unsigned char vendor_data[1 + 16];
+	unsigned char vendor_data2[1 + 16];
+	struct switch_dev	sdev;
+	struct unq_vendor_info*	unq_vendor;
+
+	unsigned int            fsync_counter;
 };
 
 struct fsg_config {
@@ -450,7 +472,65 @@ struct fsg_dev {
 
 	struct usb_ep		*bulk_in;
 	struct usb_ep		*bulk_out;
+
 };
+
+/* #define VENDOR_UNIQ_DEBUG_ON */
+#ifdef VENDOR_UNIQ_DEBUG_ON
+#define VUNIQ_ERR(stuff...)	printk("vuniq: "stuff)
+#define VUNIQ_DBG(stuff...)	printk("vuniq: "stuff)
+#define VUNIQ_DUMP(buf, length) print_hex_dump(KERN_DEBUG, "vuniq: ",  \
+					DUMP_PREFIX_OFFSET,         \
+					16, 1, buf, length, 0)
+#else
+#define VUNIQ_ERR(stuff...)	printk("vuniq: "stuff)
+#define VUNIQ_DBG(stuff...)     do { } while (0)
+#define VUNIQ_DUMP(buf, size)   do { } while (0)
+
+#endif
+
+static int vender_unique_command(struct fsg_common *common,
+		struct fsg_buffhd *bh, int32_t* reply_ptr);
+static int usbmass_open(struct inode *inode, struct file *filp);
+static unsigned int  usbmass_poll(struct file *filp, poll_table *wait);
+static long usbmass_ioctl(struct file *filp, uint32_t cmd, u_long arg);
+static const struct file_operations usbmass_fops = {
+	.owner = THIS_MODULE,
+	.poll = usbmass_poll,
+	.open = usbmass_open,
+	.unlocked_ioctl= usbmass_ioctl,
+};
+static struct miscdevice usbmass_dev_misc = {
+	.minor = MISC_DYNAMIC_MINOR,
+	.name = "usbmass",
+	.fops = &usbmass_fops,
+};
+struct usbmass_device {
+	spinlock_t          lock;
+	wait_queue_head_t   rwait;
+	wait_queue_head_t   wwait;
+	int rcomplete;
+	int wcomplete;
+	int connect_chg;
+};
+
+enum vendor_sequence {
+	VSEQ_NONE,
+	VSEQ_IO_EVENT_WAIT,
+	VSEQ_TX_DATA,
+	VSEQ_RX_DATA,
+	VSEQ_DO_READ,
+	VSEQ_DO_WRITE,
+	VSEQ_NO_DATA,
+	VSEQ_INVALID_CMD,
+	VSEQ_ERROR,
+};
+struct unq_vendor_info {
+	enum vendor_sequence vseq;
+	int vendor_exit;
+};
+struct usbmass_device usbmass_dev;
+struct ioc_startinfo_type* g_vendor_info = NULL;
 
 static inline int __fsg_is_set(struct fsg_common *common,
 			       const char *func, unsigned line)
@@ -1042,11 +1122,15 @@ static int do_write(struct fsg_common *common)
 #ifdef CONFIG_USB_MSC_PROFILING
 			start = ktime_get();
 #endif
+			common->fsync_counter++;
 			nwritten = vfs_write(curlun->filp,
 					     (char __user *)bh->buf,
 					     amount, &file_offset_tmp);
 			VLDBG(curlun, "file write %u @ %llu -> %d\n", amount,
 			      (unsigned long long)file_offset, (int)nwritten);
+			if (common->fsync_counter % FSYNC_CYCLE_MAX == 0) {
+				fsg_lun_fsync_sub(curlun);
+			}
 #ifdef CONFIG_USB_MSC_PROFILING
 			diff = ktime_sub(ktime_get(), start);
 			curlun->perf.wbytes += nwritten;
@@ -1272,12 +1356,22 @@ static int do_inquiry(struct fsg_common *common, struct fsg_buffhd *bh)
 	buf[1] = curlun->removable ? 0x80 : 0;
 	buf[2] = 2;		/* ANSI SCSI level 2 */
 	buf[3] = 2;		/* SCSI-2 INQUIRY data format */
-	buf[4] = 31;		/* Additional length */
+	//buf[4] = 31;		/* Additional length */
+	buf[4] = 31 + 12;	/* Additional length */
 	buf[5] = 0;		/* No special options */
 	buf[6] = 0;
 	buf[7] = 0;
 	memcpy(buf + 8, common->inquiry_string, sizeof common->inquiry_string);
-	return 36;
+	//return 36;
+	if (g_vendor_info) {
+		VUNIQ_DBG("%s: KDDI offset[%d] uniq offset[%d]\n", __func__,
+			(8 + sizeof common->inquiry_string - 1),
+			g_vendor_info->Offset);
+		memcpy(&buf[g_vendor_info->Offset],
+			g_vendor_info->Data, g_vendor_info->DataSize);
+		VUNIQ_DUMP(&buf[16],40);
+	}
+	return 36 + 12;
 }
 
 static int do_request_sense(struct fsg_common *common, struct fsg_buffhd *bh)
@@ -2267,6 +2361,38 @@ static int do_scsi_command(struct fsg_common *common)
 		/* Fall through */
 
 	default:
+		if (!vender_unique_command(common, bh, &reply)) {
+			break;
+		}
+		if (common->cmnd[0] == common->vendor_data[0]) {
+			common->data_size_from_cmnd = 0;
+			/* check cmd */
+			if (!strncmp(&common->cmnd[1], &common->vendor_data[1], 15)) {
+				if (fsg_is_set(common)) {
+			                switch_set_state(&common->sdev, 0);
+					switch_set_state(&common->sdev, 1);
+					reply = 0;
+				}
+				else {
+					printk(KERN_ERR "fsg is not set\n");
+					reply = -EINVAL;
+				}
+			} else if(!strncmp(&common->cmnd[1], &common->vendor_data2[1], 15)) {
+				if (fsg_is_set(common)) {
+			                switch_set_state(&common->sdev, 0);
+					switch_set_state(&common->sdev, 2);
+					reply = 0;
+				}
+				else {
+					printk(KERN_ERR "fsg is not set\n");
+					reply = -EINVAL;
+				}
+			} else {
+				printk(KERN_ERR "check_cmd error!!\n");
+				reply = -EINVAL;
+			}
+			break;
+		}
 unknown_cmnd:
 		common->data_size_from_cmnd = 0;
 		sprintf(unknown, "Unknown x%02x", common->cmnd[0]);
@@ -2490,6 +2616,7 @@ static int fsg_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 	struct fsg_dev *fsg = fsg_from_func(f);
 	struct fsg_common *common = fsg->common;
 	int rc;
+	unsigned long flags;
 
 	/* Enable the endpoints */
 	rc = config_ep_by_speed(common->gadget, &(fsg->function), fsg->bulk_in);
@@ -2514,6 +2641,14 @@ static int fsg_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 	clear_bit(IGNORE_BULK_OUT, &fsg->atomic_bitflags);
 	fsg->common->new_fsg = fsg;
 	raise_exception(fsg->common, FSG_STATE_CONFIG_CHANGE);
+
+	if (g_vendor_info) {
+		VUNIQ_DBG("%s: set POLLMSG\n", __func__);
+		spin_lock_irqsave(&usbmass_dev.lock, flags);
+		usbmass_dev.connect_chg = POLLMSG;
+		spin_unlock_irqrestore(&(usbmass_dev.lock), flags);
+		wake_up_interruptible(&(usbmass_dev.rwait));
+	}
 	return USB_GADGET_DELAYED_STATUS;
 
 reset_bulk_int:
@@ -2525,6 +2660,7 @@ reset_bulk_int:
 static void fsg_disable(struct usb_function *f)
 {
 	struct fsg_dev *fsg = fsg_from_func(f);
+	unsigned long flags;
 
 	/* Disable the endpoints */
 	if (fsg->bulk_in_enabled) {
@@ -2538,11 +2674,22 @@ static void fsg_disable(struct usb_function *f)
 		fsg->bulk_out->driver_data = NULL;
 	}
 	fsg->common->new_fsg = NULL;
+
+	if (g_vendor_info) {
+		VUNIQ_DBG("%s: set POLLREMOVE\n", __func__);
+		spin_lock_irqsave(&(usbmass_dev.lock), flags);
+		usbmass_dev.connect_chg = POLLREMOVE;
+		spin_unlock_irqrestore(&(usbmass_dev.lock), flags);
+		wake_up_interruptible(&(usbmass_dev.rwait));
+	}
+
 	raise_exception(fsg->common, FSG_STATE_CONFIG_CHANGE);
 }
 
 
 /*-------------------------------------------------------------------------*/
+
+static struct fsg_common		*the_common;
 
 static void handle_exception(struct fsg_common *common)
 {
@@ -2865,6 +3012,12 @@ static struct fsg_common *fsg_common_init(struct fsg_common *common,
 	common->ep0req = cdev->req;
 	common->cdev = cdev;
 
+	common->sdev.name = KC_VENDOR_NAME;
+	rc = switch_dev_register(&common->sdev);
+	if (unlikely(rc)) {
+		goto error_release;
+	}
+
 	/*
 	 * Create the LUNs, open their backing files, and register the
 	 * LUN devices in sysfs.
@@ -3018,6 +3171,28 @@ buffhds_first_it:
 
 	wake_up_process(common->thread_task);
 
+	common->unq_vendor =
+		kzalloc(sizeof(struct unq_vendor_info), GFP_KERNEL);
+	VUNIQ_DBG("%s:unq_vendor = 0x%08x\n", __func__,
+			(int)common->unq_vendor);
+	if (unlikely(!common->unq_vendor)) {
+		rc = -ENOMEM;
+		goto error_release;
+	}
+	rc = misc_register(&usbmass_dev_misc);
+	VUNIQ_DBG("%s:misc_register(usbmass_dev_misc):end return %d\n", __func__, rc);
+	if (rc) {
+		goto error_release;
+	}
+	init_waitqueue_head(&(usbmass_dev.rwait));
+	init_waitqueue_head(&(usbmass_dev.wwait));
+	spin_lock_init(&(usbmass_dev.lock));
+	/* until power off using ,not call "kfree","misc_deregister" */
+
+	common->fsync_counter = 0;
+
+	the_common = common;
+
 	return common;
 
 error_luns:
@@ -3067,6 +3242,8 @@ static void fsg_common_release(struct kref *ref)
 	}
 
 	kfree(common->buffhds);
+	switch_dev_unregister(&common->sdev);
+
 	if (common->free_storage_on_release)
 		kfree(common);
 }
@@ -3171,12 +3348,765 @@ autoconf_fail:
 }
 
 
+/********************* ADD FUNCTION(HDR Cooperation) ***********************/
+/*===========================================================================
+FUNCTION do_read_vendor
+
+DESCRIPTION
+ vender  write.
+
+DEPENDENCIES
+ common  [in/out]  pointer Data shared by all the FSG instances .
+
+RETURN VALUE
+ 0 on success, otherwise an error code
+
+SIDE EFFECTS
+ none
+===========================================================================*/
+static int do_read_vendor(struct fsg_common *common)
+{
+	int rc = -EIO;
+	unsigned long flags;
+	struct unq_vendor_info *vendor = common->unq_vendor;
+	struct fsg_buffhd *bh = common->next_buffhd_to_fill;
+
+	VUNIQ_DBG("%s:start\n", __func__);
+
+	for (;;) {
+		if (vendor->vendor_exit) {
+			VUNIQ_DBG("%s:vendor_exit == 1\n", __func__);
+			break;
+		}
+		bh = common->next_buffhd_to_fill;
+
+		VUNIQ_DBG("%s:start_in_transfer\n", __func__);
+		/* Send this buffer and go read some more */
+		bh->state = BUF_STATE_FULL;
+		bh->inreq->zero = 0;
+		if (!start_in_transfer(common, bh))
+			/* Don't know what to do if
+			 * common->fsg is NULL */
+			goto vendor_fail;
+		common->next_buffhd_to_fill = bh->next;
+
+		while (bh->state != BUF_STATE_EMPTY) {
+			rc = sleep_thread(common);
+			if (rc) {
+				VUNIQ_ERR("%s:err sleep_thread()\n", __func__);
+				goto vendor_fail;
+			}
+		}
+
+		VUNIQ_DBG("%s:(bh->state == %d \n", __func__, bh->state);
+
+		spin_lock_irqsave(&(usbmass_dev.lock), flags);
+		usbmass_dev.wcomplete = 1;
+		vendor->vseq = VSEQ_IO_EVENT_WAIT;
+		spin_unlock_irqrestore(&(usbmass_dev.lock), flags);
+		wake_up_interruptible(&(usbmass_dev.wwait));
+
+		while (vendor->vseq == VSEQ_IO_EVENT_WAIT) {
+			rc = sleep_thread(common);
+			if (rc) {
+				VUNIQ_ERR("%s:err sleep_thread()\n", __func__);
+				goto vendor_fail;
+			}
+		}
+		VUNIQ_DBG("%s:vendor->vseq == %d\n", __func__, vendor->vseq);
+	}
+	vendor->vendor_exit = 0;
+	VUNIQ_DBG("%s:end return %d\n", __func__, -EIO);
+	return -EIO;		/* No default reply */
+
+
+vendor_fail:
+	VUNIQ_ERR("%s:err VSEQ_ERROR\n", __func__);
+	spin_lock_irqsave(&(usbmass_dev.lock), flags);
+	usbmass_dev.wcomplete = 1;
+	vendor->vseq = VSEQ_ERROR;
+	vendor->vendor_exit = 0;
+	spin_unlock_irqrestore(&(usbmass_dev.lock), flags);
+	wake_up_interruptible(&(usbmass_dev.wwait));
+	VUNIQ_DBG("%s:end return %d\n", __func__, rc);
+	return rc;		/* No default reply */
+}
+
+
+/*===========================================================================
+FUNCTION do_write_vendor
+
+DESCRIPTION
+ vender  write.
+
+DEPENDENCIES
+ common  [in/out]  pointer Data shared by all the FSG instances .
+
+RETURN VALUE
+ 0 on success, otherwise an error code
+
+SIDE EFFECTS
+ none
+===========================================================================*/
+static int do_write_vendor(struct fsg_common *common)
+{
+	struct fsg_buffhd	*bh;
+	int			get_some_more;
+	unsigned int		amount;
+	int			rc = -EIO;
+	struct unq_vendor_info *vendor = common->unq_vendor;
+	unsigned long flags;
+
+	VUNIQ_DBG("%s:start\n", __func__);
+
+	get_some_more = 1;
+	amount = common->residue;
+
+	for (;;) {
+		if (vendor->vendor_exit) {
+			break;
+		}
+
+		/* Queue a request for more data from the host */
+		bh = common->next_buffhd_to_fill;
+		if (bh->state == BUF_STATE_EMPTY && get_some_more) {
+			bh->outreq->length = amount;
+			if (!start_out_transfer(common, bh))
+				/* Don't know what to do if
+				 * common->fsg is NULL */
+				goto vendor_fail;
+			common->next_buffhd_to_fill = bh->next;
+			get_some_more = 0;
+			continue;
+		}
+
+		/* Wait for something to happen */
+		rc = sleep_thread(common);
+		if (rc) {
+			VUNIQ_ERR("%s:err sleep_thread()\n", __func__);
+			goto vendor_fail;
+		}
+
+		/* Write the received data to the backing file */
+		bh = common->next_buffhd_to_drain;
+
+		if (bh->state == BUF_STATE_FULL) {
+			smp_rmb();
+
+			spin_lock_irqsave(&(usbmass_dev.lock), flags);
+			usbmass_dev.rcomplete = 1;
+			vendor->vseq = VSEQ_IO_EVENT_WAIT;
+			spin_unlock_irqrestore(&(usbmass_dev.lock), flags);
+			wake_up_interruptible(&(usbmass_dev.rwait));
+
+			while (vendor->vseq == VSEQ_IO_EVENT_WAIT) {
+				rc = sleep_thread(common);
+				if (rc) {
+					common->next_buffhd_to_drain =
+								 bh->next;
+					bh->state = BUF_STATE_EMPTY;
+					VUNIQ_ERR("%s:err sleep_thread()\n",
+								 __func__);
+					goto vendor_fail;
+				}
+			}
+			common->next_buffhd_to_drain = bh->next;
+			bh->state = BUF_STATE_EMPTY;
+			get_some_more = 1;
+			amount = common->residue;
+		}
+	}
+	vendor->vendor_exit = 0;
+	VUNIQ_DBG("%s:end return %d\n", __func__, -EIO);
+	return -EIO;		/* No default reply */
+
+vendor_fail:
+	VUNIQ_ERR("%s:err VSEQ_ERROR\n", __func__);
+	spin_lock_irqsave(&(usbmass_dev.lock), flags);
+	usbmass_dev.rcomplete = 1;
+	vendor->vseq = VSEQ_ERROR;
+	vendor->vendor_exit = 0;
+	spin_unlock_irqrestore(&(usbmass_dev.lock), flags);
+	wake_up_interruptible(&(usbmass_dev.rwait));
+	VUNIQ_DBG("%s:end return %d\n", __func__, rc);
+	return rc;		/* No default reply */
+}
+
+
+/*===========================================================================
+FUNCTION vender_unique_command
+
+DESCRIPTION
+ vender unique command command transfer.
+
+DEPENDENCIES
+ common  [in/out]  pointer Data shared by all the FSG instances .
+ bh      [out]     buffer pointer.
+ reply   [out]     reply status.
+
+RETURN VALUE
+       -1:unknown command
+        0:OK
+
+SIDE EFFECTS
+ none
+===========================================================================*/
+static int vender_unique_command(struct fsg_common *common,
+			struct fsg_buffhd *bh, int32_t* reply_ptr)
+{
+	int rc = 0;
+	unsigned long flags;
+	struct unq_vendor_info *vendor;
+
+	VUNIQ_DBG("%s:start\n", __func__);
+
+	if (common->unq_vendor == NULL) {
+		VUNIQ_ERR("%s:err common->unq_vendor NULL return %d\n",
+				 __func__, -ENOMEM);
+		return -ENOMEM;
+	}
+
+	if (g_vendor_info == NULL) {
+		VUNIQ_ERR("%s:err g_vendor_info NULL return %d\n",
+				 __func__, -EFAULT);
+		return -EFAULT;
+	}
+
+	vendor = common->unq_vendor;
+
+	/* command event */
+	spin_lock_irqsave(&(usbmass_dev.lock), flags);
+	usbmass_dev.rcomplete = 1;
+	vendor->vseq = VSEQ_IO_EVENT_WAIT;
+	spin_unlock_irqrestore(&(usbmass_dev.lock), flags);
+	wake_up_interruptible(&(usbmass_dev.rwait));
+
+	/* wait event */
+	while (vendor->vseq == VSEQ_IO_EVENT_WAIT) {
+		rc = sleep_thread(common);
+		if (rc) {
+			VUNIQ_ERR("%s:err sleep_thread() return %d\n", __func__, rc);
+			return rc;
+		}
+	}
+
+	VUNIQ_DBG("%s:start vendor->vseq[%d]\n", __func__, vendor->vseq);
+	switch (vendor->vseq) {
+	case VSEQ_TX_DATA :
+		*reply_ptr = do_read_vendor(common);
+		break;
+	case VSEQ_RX_DATA:
+		*reply_ptr = do_write_vendor(common);
+		break;
+	case VSEQ_DO_READ:
+		common->data_size_from_cmnd =
+			get_unaligned_be16(&common->cmnd[7]) << 9;
+		*reply_ptr = check_command(common, 10, DATA_DIR_TO_HOST,
+					(1<<1) | (0xf<<2) | (3<<7), 1,
+					"READ(10)");
+		if (*reply_ptr == 0)
+			*reply_ptr = do_read(common);
+		break;
+	case VSEQ_DO_WRITE:
+		common->data_size_from_cmnd =
+				get_unaligned_be16(&common->cmnd[7]) << 9;
+		*reply_ptr = check_command(common, 10, DATA_DIR_FROM_HOST,
+					(1<<1) | (0xf<<2) | (3<<7), 1,
+					"WRITE(10)");
+		if (*reply_ptr == 0) {
+			*reply_ptr = do_write(common);
+		}
+		break;
+	case VSEQ_NO_DATA:
+		*reply_ptr = 0;
+		break;
+	case VSEQ_INVALID_CMD:
+	default:
+		rc = -EINVAL;
+		break;
+	}
+	if (vendor->vseq != VSEQ_ERROR) {
+		vendor->vseq = VSEQ_NONE;
+		VUNIQ_DBG("%s:set vendor->vseq = VSEQ_NONE\n", __func__);
+	}
+	VUNIQ_DBG("%s:end rc %d\n", __func__, rc);
+	return rc;
+}
+
+
+/*===========================================================================
+FUNCTION usbmass_open
+
+DESCRIPTION
+ device file open.
+
+DEPENDENCIES
+ inode  [in]      device file inode pointer.
+ filp   [in/out]  file status pointer.
+
+RETURN VALUE
+ 0 on success
+
+SIDE EFFECTS
+ none
+===========================================================================*/
+static int usbmass_open(struct inode *inode, struct file *filp)
+{
+	VUNIQ_DBG("%s:start\n", __func__);
+	/* save device in the file's private structure */
+	usbmass_dev.connect_chg = 0;
+	usbmass_dev.rcomplete = 0;
+	usbmass_dev.wcomplete = 0;
+	filp->private_data = &usbmass_dev;
+	VUNIQ_DBG("%s:end\n", __func__);
+	return 0;
+}
+
+
+/*===========================================================================
+FUNCTION usbmass_poll
+
+DESCRIPTION
+ event polling.
+
+DEPENDENCIES
+ filp  [in]    file status pointer.
+ wait  [in]    poll table pointer.
+
+RETURN VALUE
+ 0 on success, otherwise an error code
+
+SIDE EFFECTS
+ none
+===========================================================================*/
+static unsigned int usbmass_poll(struct file *filp, poll_table *wait)
+{
+	int ret = 0;
+	unsigned long flags;
+	struct usbmass_device *dev = filp->private_data;
+	struct fsg_common *common = the_common;
+	struct unq_vendor_info *vendor =  common->unq_vendor;
+	vendor = common->unq_vendor;
+
+	VUNIQ_DBG("%s:start\n", __func__);
+
+	poll_wait(filp, &(dev->rwait), wait);
+
+	poll_wait(filp, &(dev->wwait), wait);
+
+	spin_lock_irqsave(&(dev->lock), flags);
+
+	VUNIQ_DBG("%s:dev->connect_chg = 0x%04x \n",
+			__func__, dev->connect_chg);
+	VUNIQ_DBG("%s:dev->rcomplete = %d, dev->wcomplete =%d \n",
+			__func__, dev->rcomplete, dev->wcomplete);
+
+	if (vendor->vseq == VSEQ_ERROR) {
+		VUNIQ_ERR("%s:err POLLERR\n", __func__);
+		ret = POLLERR;
+		vendor->vseq = VSEQ_NONE;
+		VUNIQ_DBG("%s:set vendor->vseq = VSEQ_NONE\n", __func__);
+	}
+
+	if (dev->connect_chg) {
+		ret |= (POLLIN | POLLOUT | dev->connect_chg);
+		dev->connect_chg = 0;
+	} else if ((dev->rcomplete) ) {
+		ret |= (POLLIN  | POLLRDNORM);
+		dev->rcomplete = 0;
+	} else if (dev->wcomplete) {
+		ret |= (POLLOUT | POLLWRNORM);
+		dev->wcomplete = 0;
+	}
+	spin_unlock_irqrestore(&(dev->lock), flags);
+	VUNIQ_DBG("%s:end ret 0x%04x\n", __func__, ret);
+	return ret;
+}
+
+
+/*===========================================================================
+FUNCTION ioc_get_data
+
+DESCRIPTION
+ vender  write.
+
+DEPENDENCIES
+ common  [in/out]  pointer Data shared by all the FSG instances .
+ data    [in]      user data pointer .
+
+RETURN VALUE
+ 0 on success, otherwise an error code
+
+SIDE EFFECTS
+ none
+===========================================================================*/
+static int ioc_get_data(struct fsg_common *common,
+			struct ioc_data_type* data)
+{
+	int rc = 0;
+	struct fsg_buffhd *bh = common->next_buffhd_to_drain;
+
+	VUNIQ_DBG("%s:start\n", __func__);
+	/* Did the host decide to stop early? */
+	if (bh->outreq->actual != bh->outreq->length) {
+		common->short_packet_received = 1;
+		VUNIQ_ERR("%s:err bh->outreq->actual\n", __func__);
+		return -EFAULT;
+	}
+
+	rc = put_user(bh->outreq->actual, &data->BuffSize);
+	if (rc) {
+		VUNIQ_ERR("%s:err put_user()\n", __func__);
+		return -EFAULT;
+	}
+	VUNIQ_DUMP(bh->buf, 16);
+	rc = copy_to_user(data->Buff, bh->buf, bh->outreq->actual);
+	if (rc) {
+		VUNIQ_ERR("%s:err copy_to_user()\n", __func__);
+		return -EFAULT;
+	}
+	VUNIQ_DBG("%s:end rc %d\n", __func__, rc);
+	return rc;
+}
+
+
+/*===========================================================================
+FUNCTION ioc_tx_data
+
+DESCRIPTION
+ vender  write.
+
+DEPENDENCIES
+ common  [in/out]  pointer Data shared by all the FSG instances .
+ data    [in]      user data pointer .
+
+RETURN VALUE
+ 0 on success, otherwise an error code
+
+SIDE EFFECTS
+ none
+===========================================================================*/
+static int ioc_tx_data(struct fsg_common *common,
+			struct ioc_data_type* data)
+{
+	int rc = 0;
+	struct ioc_data_type st_data;
+	struct unq_vendor_info *vendor = common->unq_vendor;
+	struct fsg_buffhd *bh = common->next_buffhd_to_fill;
+	struct fsg_lun *curlun = common->curlun;
+	int flg_data = 0;
+
+	VUNIQ_DBG("%s:start\n", __func__);
+	vendor->vendor_exit = 0;
+	rc = copy_from_user(&st_data, data, sizeof(struct ioc_data_type));
+	if (rc) {
+		st_data.CSW.SenseData = SS_UNRECOVERED_READ_ERROR;
+		vendor->vendor_exit = 1;
+		VUNIQ_ERR("%s:err copy_to_user()\n", __func__);
+		rc = -EFAULT;
+	} else {
+		VUNIQ_DBG("%s:Request[%d]\n",
+			 __func__, st_data.Request);
+		switch (st_data.Request){
+		case USBMAS_REQUEST_DATA_LAST:
+			vendor->vendor_exit = 1;
+		case USBMAS_REQUEST_DATA:
+			if (st_data.BuffSize) {
+				flg_data = 1;
+			} else {
+				/* not set vendor_exit because...secure_mass modules */
+				/*  ioctl USBMAS_REQUEST_DATA_ERROR                  */
+				/* vendor->vendor_exit = 1; */
+				st_data.CSW.SenseData = SS_UNRECOVERED_READ_ERROR;
+				VUNIQ_ERR("%s:err BuffSize 0 \n", __func__);
+				rc = -EINVAL;
+			}
+			break;
+		case USBMAS_REQUEST_DATA_ERROR:
+			vendor->vendor_exit = 1;
+			break;
+		}
+	}
+
+	if (flg_data) {
+		VUNIQ_DBG("%s:bh->state[%d]\n", __func__, bh->state);
+		/* wait buffer empty */
+		while (bh->state != BUF_STATE_EMPTY) {
+			rc = sleep_thread(common);
+			if (rc) {
+				st_data.CSW.SenseData = SS_UNRECOVERED_READ_ERROR;
+				VUNIQ_ERR("%s:err sleep_thread() return %d\n", __func__, -EFAULT);
+				return -EFAULT;
+			}
+		}
+
+		rc = copy_from_user(bh->buf, st_data.Buff, st_data.BuffSize);
+		if (rc) {
+			st_data.CSW.SenseData = SS_UNRECOVERED_READ_ERROR;
+			VUNIQ_ERR("%s:err copy_from_user()\n", __func__);
+			rc = -EFAULT;
+		} else {
+			bh->inreq->length = st_data.BuffSize;
+		}
+		VUNIQ_DUMP(bh->buf, 16);
+		VUNIQ_DBG("%s:bh->inreq->length[%d] BuffSize[%d] \n",
+			 __func__, bh->inreq->length,  st_data.BuffSize);
+	}
+	if (vendor->vendor_exit) {
+		common->residue = st_data.CSW.Residue;
+		curlun->sense_data = st_data.CSW.SenseData;
+		VUNIQ_DBG("%s:set CSW residue[%d] sense_data[0x%06X]\n",
+			__func__, common->residue, curlun->sense_data);
+		if (st_data.CSW.Status == US_BULK_STAT_PHASE) {
+			VUNIQ_DBG("%s:set phase_error\n", __func__);
+			common->phase_error = 1;
+		}
+	}
+	VUNIQ_DBG("%s:end rc %d\n", __func__, rc);
+	return rc;
+}
+
+
+/*===========================================================================
+FUNCTION ioc_rx_data
+
+DESCRIPTION
+ vender  write.
+
+DEPENDENCIES
+ common  [in/out]  pointer Data shared by all the FSG instances .
+ data    [in]      user data pointer .
+
+RETURN VALUE
+ 0 on success, otherwise an error code
+
+SIDE EFFECTS
+ none
+===========================================================================*/
+static int ioc_rx_data(struct fsg_common *common,
+			struct ioc_data_type* data)
+{
+	int rc = 0;
+	struct ioc_data_type st_data;
+	struct unq_vendor_info *vendor = common->unq_vendor;
+	struct fsg_lun *curlun = common->curlun;
+
+	VUNIQ_DBG("%s:start\n", __func__);
+	vendor->vendor_exit = 0;
+
+	rc = copy_from_user(&st_data, data, sizeof(struct ioc_data_type));
+	if (rc) {
+		st_data.CSW.SenseData = SS_WRITE_ERROR;
+		vendor->vendor_exit = 1;
+		VUNIQ_ERR("%s:err copy_from_user()\n", __func__);
+		rc = -EFAULT;
+	} else {
+		VUNIQ_DBG("%s:Request[%d]\n",
+			 __func__, st_data.Request);
+		switch (st_data.Request){
+		case USBMAS_REQUEST_DATA:
+			common->residue = st_data.BuffSize;
+			break;
+		case USBMAS_REQUEST_DATA_LAST:
+		case USBMAS_REQUEST_DATA_ERROR:
+		default:
+			vendor->vendor_exit = 1;
+			break;
+		}
+	}
+	if (vendor->vendor_exit) {
+		common->residue = st_data.CSW.Residue;
+		curlun->sense_data = st_data.CSW.SenseData;
+		VUNIQ_DBG("%s:set CSW residue[%d] sense_data[0x%06X]\n",
+			__func__, common->residue, curlun->sense_data);
+		if (st_data.CSW.Status == US_BULK_STAT_PHASE) {
+			VUNIQ_DBG("%s:set phase_error\n", __func__);
+			common->phase_error = 1;
+		}
+	}
+	VUNIQ_DBG("%s:end rc %d\n", __func__, rc);
+	return rc;
+}
+
+
+/*===========================================================================
+FUNCTION usbmass_ioctl
+
+DESCRIPTION
+ event ioctl.
+
+DEPENDENCIES
+ filp   [in]       file status pointer.
+ cmd    [in/out]   command pointer.
+ arg    [in/out]   paramater pointer.
+
+RETURN VALUE
+ 0 on success, otherwise an error code
+
+SIDE EFFECTS
+
+===========================================================================*/
+static long usbmass_ioctl(struct file *filp, unsigned cmd, unsigned long arg)
+{
+	long rc = 0;
+	void __user *u_arg = (void __user *)arg;
+	struct usbmass_device *dev = filp->private_data;
+	struct fsg_common *common = the_common;
+	struct unq_vendor_info *vendor =  common->unq_vendor;
+	enum vendor_sequence vseq = VSEQ_NONE;
+
+	VUNIQ_DBG("%s:start cmd = 0x%04X\n", __func__, cmd);
+	switch (cmd) {
+	case USBMAS_IOC_START_NOTIFY:
+		if (g_vendor_info == NULL) {
+			g_vendor_info =
+				kzalloc(sizeof(struct ioc_startinfo_type),
+				GFP_KERNEL);
+			VUNIQ_DBG("%s:g_vendor_info = 0x%08x\n",
+					 __func__, (int)g_vendor_info);
+		}
+		if (g_vendor_info) {
+			rc = copy_from_user(g_vendor_info, u_arg,
+					sizeof(struct ioc_startinfo_type));
+			if (rc) {
+				VUNIQ_ERR("%s:err copy_from_user()\n", __func__);
+				rc = -EFAULT;
+			}
+			VUNIQ_DBG("%s:Offset[%d] DataSize[%d]\n",
+				__func__, g_vendor_info->Offset,
+				g_vendor_info->DataSize);
+			VUNIQ_DUMP(g_vendor_info->Data,
+					USBMAS_MAX_COMMAND_SIZE);
+		}
+		break;
+	case USBMAS_IOC_GET_COMMAND:
+		{
+		struct ioc_bulk_cb_wrap_type ioc_cbw;
+		memset(&ioc_cbw, 0, sizeof(ioc_cbw));
+		ioc_cbw.TransferLength = common->data_size;
+		ioc_cbw.DataDir = (uint8_t)(common->data_dir);
+		ioc_cbw.Lun = common->lun;
+		ioc_cbw.CmdLength = common->cmnd_size;
+		memcpy(ioc_cbw.Cmd, common->cmnd, common->cmnd_size);
+		rc = copy_to_user(u_arg, &ioc_cbw, sizeof(ioc_cbw));
+		if (rc) {
+			rc = -EFAULT;
+			dev->rcomplete = 0;
+			VUNIQ_ERR("%s:err copy_to_user()\n", __func__);
+		}
+		VUNIQ_DUMP(&ioc_cbw, sizeof(ioc_cbw));
+		break;
+		}
+	case USBMAS_IOC_GET_FSGLUN:
+		{
+		struct fsg_lun *curlun;
+		struct ioc_fsg_lun_type ioc_fsg;
+		memset(&ioc_fsg, 0, sizeof(ioc_fsg));
+		ioc_fsg.Luns = common->nluns;
+		if ((common->lun >= 0) && (common->lun < common->nluns)) {
+			curlun = &common->luns[common->lun];
+			common->curlun = curlun;
+			curlun->sense_data = SS_NO_SENSE;
+			curlun->sense_data_info = 0;
+			curlun->info_valid = 0;
+			common->data_size_from_cmnd = common->data_size;
+			ioc_fsg.FileSts = (curlun->filp) ? 1: 0 ;
+			ioc_fsg.NumSectors = curlun->num_sectors;
+			ioc_fsg.Ro = curlun->ro;
+			ioc_fsg.SenseData = curlun->sense_data;
+			ioc_fsg.UnitAttentionData =
+					curlun->unit_attention_data;
+			ioc_fsg.FsgBuffLen = FSG_BUFLEN;
+		} else {
+			common->curlun = NULL;
+			common->bad_lun_okay = 0;
+		}
+		VUNIQ_DBG("%s: Luns[%d] FileSts[%d] NumSectors[%d] Ro[%d] "
+		"SenseData[0x%06X] SenseDataInfo[%d] UnitAttentionData[%d]"
+		" FsgBuffLen[%d] sizeof(%d)\n",
+		__func__, ioc_fsg.Luns, ioc_fsg.FileSts, ioc_fsg.NumSectors,
+		ioc_fsg.Ro, ioc_fsg.SenseData, ioc_fsg.SenseDataInfo,
+		ioc_fsg.UnitAttentionData, ioc_fsg.FsgBuffLen,
+		sizeof(ioc_fsg));
+		rc = copy_to_user(u_arg, &ioc_fsg, sizeof(ioc_fsg));
+		if (rc) {
+			VUNIQ_ERR("%s:err copy_to_user()\n", __func__);
+			rc = -EFAULT;
+		}
+		break;
+		}
+	case USBMAS_IOC_GET_DATA:
+		rc  = ioc_get_data(common, (struct ioc_data_type*)arg);
+		break;
+	case USBMAS_IOC_TX_DATA:
+		rc = ioc_tx_data(common, (struct ioc_data_type*)arg);
+		vseq = VSEQ_TX_DATA;
+		break;
+	case USBMAS_IOC_RX_DATA:
+		rc = ioc_rx_data(common, (struct ioc_data_type*)arg);
+		vseq = VSEQ_RX_DATA;
+		break;
+	case USBMAS_IOC_DO_READ:
+		vseq = VSEQ_DO_READ;
+		break;
+	case USBMAS_IOC_DO_WRITE:
+		vseq = VSEQ_DO_WRITE;
+		break;
+	case USBMAS_IOC_NO_DATA:
+		{
+		struct fsg_lun *curlun;
+		struct ioc_data_type st_data;
+		curlun = common->curlun;
+		rc = copy_from_user(&st_data, u_arg,
+					sizeof(struct ioc_data_type));
+		if (rc) {
+			st_data.CSW.Residue = 0;
+			st_data.CSW.SenseData = SS_COMMUNICATION_FAILURE;
+			rc = -EFAULT;
+			VUNIQ_ERR("%s:err copy_from_user()\n", __func__);
+		}
+		common->residue = st_data.CSW.Residue;
+		curlun->sense_data = st_data.CSW.SenseData;
+		VUNIQ_DBG("%s:set CSW residue[%d] sense_data[0x%06X]\n",
+			__func__, common->residue, curlun->sense_data);
+		if (st_data.CSW.Status == US_BULK_STAT_PHASE) {
+			VUNIQ_DBG("%s:set phase_error\n", __func__);
+			common->phase_error = 1;
+		}
+		if (curlun->unit_attention_data != SS_NO_SENSE) {
+			curlun->unit_attention_data = SS_NO_SENSE;
+		}
+		vseq = VSEQ_NO_DATA;
+		break;
+		}
+	case USBMAS_IOC_INVALID_COMMAND:
+		vseq = VSEQ_INVALID_CMD;
+		break;
+	default:
+		rc = -EINVAL;
+	}
+	VUNIQ_DBG("%s:vseq = %d\n", __func__, vseq);
+	if (vseq != VSEQ_NONE) {
+		spin_lock(&common->lock);
+		vendor->vseq = vseq;
+		VUNIQ_DBG("%s:wakeup_thread\n", __func__);
+		wakeup_thread(common);
+		spin_unlock(&common->lock);
+	}
+	VUNIQ_DBG("%s:end rc %ld\n", __func__, rc);
+	return rc;
+}
+
+
+
 /****************************** ADD FUNCTION ******************************/
 
+#if 0
 static struct usb_gadget_strings *fsg_strings_array[] = {
 	&fsg_stringtab,
 	NULL,
 };
+#endif
 
 static int fsg_bind_config(struct usb_composite_dev *cdev,
 			   struct usb_configuration *c,
@@ -3185,6 +4115,9 @@ static int fsg_bind_config(struct usb_composite_dev *cdev,
 	struct fsg_dev *fsg;
 	int rc;
 
+#if 1
+	fsg_intf_desc.iInterface = 0;
+#else
 	/* Maybe allocate device-global string IDs, and patch descriptors */
 	if (fsg_strings[FSG_STRING_INTERFACE].id == 0) {
 		rc = usb_string_id(cdev);
@@ -3193,13 +4126,16 @@ static int fsg_bind_config(struct usb_composite_dev *cdev,
 		fsg_strings[FSG_STRING_INTERFACE].id = rc;
 		fsg_intf_desc.iInterface = rc;
 	}
+#endif
 
 	fsg = kzalloc(sizeof *fsg, GFP_KERNEL);
 	if (unlikely(!fsg))
 		return -ENOMEM;
 
 	fsg->function.name        = "mass_storage";
+#if 0
 	fsg->function.strings     = fsg_strings_array;
+#endif
 	fsg->function.bind        = fsg_bind;
 	fsg->function.unbind      = fsg_unbind;
 	fsg->function.setup       = fsg_setup;

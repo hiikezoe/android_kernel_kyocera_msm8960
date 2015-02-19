@@ -73,6 +73,42 @@ enum pm8xxx_pon_config {
 	PM8XXX_RESTART_ON_HARD_RESET,
 };
 
+enum kc_pm8xxx_hard_reset_delay {
+	PM8XXX_HARD_RESET_DELAY_0_MSEC = 0,
+	PM8XXX_HARD_RESET_DELAY_10_MSEC,
+	PM8XXX_HARD_RESET_DELAY_50_MSEC,
+	PM8XXX_HARD_RESET_DELAY_100_MSEC,
+	PM8XXX_HARD_RESET_DELAY_250_MSEC,
+	PM8XXX_HARD_RESET_DELAY_500_MSEC,
+	PM8XXX_HARD_RESET_DELAY_1000_MSEC,
+	PM8XXX_HARD_RESET_DELAY_2000_MSEC,
+};
+
+enum kc_pm8xxx_hard_reset_debounce {
+	PM8XXX_HARD_RESET_DEBOUNCE_0_MSEC = 0,
+	PM8XXX_HARD_RESET_DEBOUNCE_32_MSEC,
+	PM8XXX_HARD_RESET_DEBOUNCE_56_MSEC,
+	PM8XXX_HARD_RESET_DEBOUNCE_80_MSEC,
+	PM8XXX_HARD_RESET_DEBOUNCE_128_MSEC,
+	PM8XXX_HARD_RESET_DEBOUNCE_184_MSEC,
+	PM8XXX_HARD_RESET_DEBOUNCE_272_MSEC,
+	PM8XXX_HARD_RESET_DEBOUNCE_408_MSEC,
+	PM8XXX_HARD_RESET_DEBOUNCE_608_MSEC,
+	PM8XXX_HARD_RESET_DEBOUNCE_904_MSEC,
+	PM8XXX_HARD_RESET_DEBOUNCE_1352_MSEC,
+	PM8XXX_HARD_RESET_DEBOUNCE_2048_MSEC,
+	PM8XXX_HARD_RESET_DEBOUNCE_3072_MSEC,
+	PM8XXX_HARD_RESET_DEBOUNCE_4480_MSEC,
+	PM8XXX_HARD_RESET_DEBOUNCE_6720_MSEC,
+	PM8XXX_HARD_RESET_DEBOUNCE_10256_MSEC,
+};
+
+struct kc_pm8xxx_hard_reset_config {
+	enum pm8xxx_pon_config			enable;
+	enum kc_pm8xxx_hard_reset_delay		delay;
+	enum kc_pm8xxx_hard_reset_debounce	debounce;
+};
+
 enum pm8xxx_aux_clk_id {
 	CLK_MP3_1,
 	CLK_MP3_2,
@@ -170,6 +206,43 @@ int pm8xxx_watchdog_reset_control(int enable);
 int pm8xxx_hard_reset_config(enum pm8xxx_pon_config config);
 
 /**
+ * kc_pm8xxx_hard_reset_config - Allows different reset configurations
+ *
+ * enable = PM8XXX_DISABLE_HARD_RESET to disable hard reset
+ *	  = PM8XXX_SHUTDOWN_ON_HARD_RESET to turn off the system on hard reset
+ *	  = PM8XXX_RESTART_ON_HARD_RESET to restart the system on hard reset
+ *
+ * delay  = PM8XXX_HARD_RESET_DELAY_0_MSEC to set delay_timer 0 msec.
+ *	  = PM8XXX_HARD_RESET_DELAY_10_MSEC to set delay_timer 10 msec.
+ *	  = PM8XXX_HARD_RESET_DELAY_50_MSEC to set delay_timer 50 msec.
+ *	  = PM8XXX_HARD_RESET_DELAY_100_MSEC to set delay_timer 100 msec.
+ *	  = PM8XXX_HARD_RESET_DELAY_250_MSEC to set delay_timer 250 msec.
+ *	  = PM8XXX_HARD_RESET_DELAY_500_MSEC to set delay_timer 500 msec.
+ *	  = PM8XXX_HARD_RESET_DELAY_1000_MSEC to set delay_timer 1000 msec.
+ *        = PM8XXX_HARD_RESET_DELAY_2000_MSEC to set delay_timer 2000 msec.
+ *
+ * debounce = PM8XXX_HARD_RESET_DEBOUNCE_0_MSEC to set debounce 0 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_32_MSEC to set debounce 32 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_56_MSEC to set debounce 56 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_80_MSEC to set debounce 80 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_128_MSEC to set debounce 128 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_184_MSEC to set debounce 184 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_272_MSEC to set debounce 272 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_408_MSEC to set debounce 408 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_608_MSEC to set debounce 608 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_904_MSEC to set debounce 904 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_1352_MSEC to set debounce 1352 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_2048_MSEC to set debounce 2048 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_3072_MSEC to set debounce 3072 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_4480_MSEC to set debounce 4480 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_6720_MSEC to set debounce 6720 msec.
+ *	    = PM8XXX_HARD_RESET_DEBOUNCE_10256_MSEC to set debounce 10256 msec.
+ *
+ * RETURNS: an appropriate -ERRNO error value on error, or zero for success.
+ */
+int kc_pm8xxx_hard_reset_config(struct kc_pm8xxx_hard_reset_config *config);
+
+/**
  * pm8xxx_stay_on - enables stay_on feature
  *
  * PMIC stay-on feature allows PMIC to ignore MSM PS_HOLD=low
@@ -263,6 +336,11 @@ static inline int pm8xxx_watchdog_reset_control(int enable)
 	return -ENODEV;
 }
 static inline int pm8xxx_hard_reset_config(enum pm8xxx_pon_config config)
+{
+	return -ENODEV;
+}
+static inline int kc_pm8xxx_hard_reset_config(
+				struct kc_pm8xxx_hard_reset_config *config)
 {
 	return -ENODEV;
 }

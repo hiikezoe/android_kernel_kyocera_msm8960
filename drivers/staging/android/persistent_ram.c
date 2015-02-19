@@ -342,6 +342,7 @@ void persistent_ram_free_old(struct persistent_ram_zone *prz)
 static int persistent_ram_buffer_map(phys_addr_t start, phys_addr_t size,
 		struct persistent_ram_zone *prz)
 {
+#if 0
 	struct page **pages;
 	phys_addr_t page_start;
 	unsigned int page_count;
@@ -373,6 +374,9 @@ static int persistent_ram_buffer_map(phys_addr_t start, phys_addr_t size,
 
 	prz->buffer = prz->vaddr + offset_in_page(start);
 	prz->buffer_size = size - sizeof(struct persistent_ram_buffer);
+#endif
+    prz->buffer = (struct persistent_ram_buffer *)start;
+    prz->buffer_size = size - sizeof(struct persistent_ram_buffer);
 
 	return 0;
 }

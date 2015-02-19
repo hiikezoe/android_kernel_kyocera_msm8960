@@ -10,6 +10,7 @@
  * GNU General Public License for more details.
  */
 #include "msm_camera_eeprom.h"
+#include "msm.h"
 
 int32_t msm_camera_eeprom_read(struct msm_eeprom_ctrl_t *ectrl,
 	uint32_t reg_addr, void *data, uint32_t num_byte,
@@ -32,6 +33,10 @@ int32_t msm_camera_eeprom_read(struct msm_eeprom_ctrl_t *ectrl,
 			data_ptr[i] = buf[i+1];
 			data_ptr[i+1] = buf[i];
 		}
+	}
+	if (rc < 0) {
+		pr_err("%s: i2c read err \n", __func__);
+		msm_eeprom_evt_notify(ectrl, MSG_ID_ERROR_I2C);
 	}
 	return rc;
 }
@@ -78,6 +83,20 @@ int32_t msm_camera_eeprom_get_data(struct msm_eeprom_ctrl_t *ectrl,
 		ectrl->data_tbl[edata->index].data,
 		ectrl->data_tbl[edata->index].size))
 		rc = -EFAULT;
+	return rc;
+}
+
+int32_t msm_eeprom_evt_notify(struct msm_eeprom_ctrl_t *eclient, uint8_t msg_id)
+{
+	int32_t rc = 0;
+	struct msm_cam_media_controller *pmctl =
+		(struct msm_cam_media_controller *)v4l2_get_subdev_hostdata(&eclient->sdev);
+
+	CDBG("%s: E msg_id = %d\n", __func__, msg_id);
+
+	rc = msm_camera_evt_notify(pmctl, msg_id);
+
+	CDBG("%s: X rc = %d\n", __func__, rc);
 	return rc;
 }
 
@@ -172,9 +191,16 @@ int32_t msm_eeprom_i2c_probe(struct i2c_client *client,
 		rc = e_ctrl_t->func_tbl.eeprom_init(e_ctrl_t,
 			e_ctrl_t->i2c_client.client->adapter);
 	}
-	msm_camera_eeprom_read_tbl(e_ctrl_t,
+	rc = msm_camera_eeprom_read_tbl(e_ctrl_t,
 		e_ctrl_t->read_tbl,
 		e_ctrl_t->read_tbl_size);
+	if (rc < 0) {
+		pr_err("%s: eeprom_read failed \n", __func__);
+		goto probe_failure;
+	}
+	else {
+		rc = 0;
+	}
 
 	if (e_ctrl_t->func_tbl.eeprom_format_data != NULL)
 		e_ctrl_t->func_tbl.eeprom_format_data();

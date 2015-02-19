@@ -24,6 +24,12 @@
 #define PC_TEMP_ROWS		29
 #define PC_TEMP_COLS		8
 
+#define RBATT_ROWS		22
+#define RBATT_COLS		5
+
+#define SOC_ADJUST_ROWS		6
+#define SOC_ADJUST_COLS		8
+
 #define MAX_SINGLE_LUT_COLS	20
 
 struct single_row_lut {
@@ -49,6 +55,22 @@ struct sf_lut {
 	int row_entries[PC_CC_COLS];
 	int percent[PC_CC_ROWS];
 	int sf[PC_CC_ROWS][PC_CC_COLS];
+};
+
+struct rbatt_lut {
+	int rows;
+	int cols;
+	int temp[RBATT_COLS];
+	int vbatt[RBATT_ROWS];
+	int rbatt[RBATT_ROWS][RBATT_COLS];
+};
+
+struct soc_adjust_lut {
+	int rows;
+	int cols;
+	int temp[SOC_ADJUST_COLS];
+	int ibatt[SOC_ADJUST_ROWS];
+	int soc_adjust[SOC_ADJUST_ROWS][SOC_ADJUST_COLS];
 };
 
 /**
@@ -104,10 +126,71 @@ struct bms_battery_data {
 	int			rbatt_capacitive_mohm;
 };
 
+struct pm8921_bms_oem_battery_data {
+	struct	rbatt_lut	*rbatt_initial_lut;
+	struct	soc_adjust_lut	*soc_adjust_lut;
+	struct	single_row_lut	*cycle_adjust_lut;
+};
+
 #if defined(CONFIG_PM8921_BMS) || \
 	defined(CONFIG_PM8921_BMS_MODULE)
 extern struct bms_battery_data  palladium_1500_data;
 extern struct bms_battery_data  desay_5200_data;
+extern struct pm8921_bms_oem_battery_data pm8921_bms_oem_data;
+
+enum pm8921_bms_chg_state {
+	CHG_STATE_NONCONNECTED,
+	CHG_STATE_IDLE,
+	CHG_STATE_TRICKLE,
+	CHG_STATE_FAST_COOL,
+	CHG_STATE_FAST_NORMAL,
+	CHG_STATE_FAST_WARM,
+	CHG_STATE_INTE_COOL,
+	CHG_STATE_INTE_NORMAL,
+	CHG_STATE_INTE_WARM,
+	CHG_STATE_CHG_COMP,
+	CHG_STATE_CHG_TIMEOUT,
+	CHG_STATE_CHG_STAND,
+	CHG_STATE_BATT_TEMP_COLD,
+	CHG_STATE_BATT_TEMP_HOT,
+	CHG_STATE_WAIT_TEMP,
+	CHG_STATE_BATT_ID_ERROR,
+	CHG_STATE_CHG_ERROR,
+	CHG_STATE_INIT,
+	CHG_STATE_MAX
+};
+
+enum pm8921_bms_chg_mode {
+	CHG_MODE_DISCHARGE,
+	CHG_MODE_CHARGING,
+	CHG_MODE_FULL
+};
+
+enum pm8921_bms_chg_condition {
+	CHG_CONDITION_4340MV,
+	CHG_CONDITION_4240MV,
+	CHG_CONDITION_4340MV_INTE,
+	CHG_CONDITION_4240MV_INTE,
+	CHG_CONDITION_MAX,
+	CHG_CONDITION_NULL
+};
+
+struct pm8921_bms_correction {
+	enum pm8921_bms_chg_state	chg_state;
+	enum pm8921_bms_chg_mode	chg_mode;
+	enum pm8921_bms_chg_condition	chg_condition_uim_valid;
+	enum pm8921_bms_chg_condition	chg_condition_uim_invalid;
+};
+
+enum pm8921_bms_cyclecorrect_state {
+	CHG_CYCLECORRECT_STATE_CHARGER_NO,
+	CHG_CYCLECORRECT_STATE_CHARGER_DETECTED,
+	CHG_CYCLECORRECT_STATE_OK1,
+	CHG_CYCLECORRECT_STATE_OK2,
+	CHG_CYCLECORRECT_STATE_PARAM_OBTAINED1,
+	CHG_CYCLECORRECT_STATE_PARAM_OBTAINED2,
+	CHG_CYCLECORRECT_STATE_CALCULATED
+};
 
 int interpolate_fcc(struct single_row_lut *fcc_temp_lut, int batt_temp);
 int interpolate_scalingfactor(struct sf_lut *sf_lut, int row_entry, int pc);

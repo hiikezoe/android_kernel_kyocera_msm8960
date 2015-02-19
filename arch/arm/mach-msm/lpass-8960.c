@@ -48,6 +48,10 @@ struct lpass_ssr {
 static struct lpass_ssr lpass_ssr_8960;
 static int q6_crash_shutdown;
 
+extern void set_smem_crash_system_lpass(void);
+extern void set_smem_crash_kind_wdog_hw(void);
+extern void set_smem_crash_info_data( const char *pdata );
+
 static int riva_notifier_cb(struct notifier_block *this, unsigned long code,
 								void *ss_handle)
 {
@@ -129,6 +133,19 @@ static void lpass_fatal_fn(struct work_struct *work)
 	set_ssr_magic_number("lpass");
 	msm_set_restart_mode(0x6d634130);
 #endif
+	set_smem_crash_system_lpass();
+	set_smem_crash_kind_wdog_hw();
+	{
+		char buf[33];
+		memset( buf, '\0', sizeof(buf) );
+		snprintf( buf,
+		          sizeof(buf),
+		          "%x;%s",
+		          __LINE__,
+		          __func__
+		);
+		set_smem_crash_info_data( (const char *)buf );
+	}
 	panic(MODULE_NAME ": Resetting the SoC");
 }
 

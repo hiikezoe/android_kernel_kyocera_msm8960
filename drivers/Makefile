@@ -141,4 +141,13 @@ obj-$(CONFIG_PM_DEVFREQ)	+= devfreq/
 #MobiCore
 obj-$(CONFIG_MOBICORE_SUPPORT)  += gud/
 
+obj-y				+= sensors/
+
+#IrDA drivers
+obj-y				+= irda/
+obj-y				+= irda1/
+obj-y				+= irda2/
+
+obj-y				+= felica/
+
 obj-$(CONFIG_CORESIGHT)		+= coresight/

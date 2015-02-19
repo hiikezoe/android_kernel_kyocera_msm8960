@@ -24,6 +24,9 @@ EXPORT_SYMBOL_GPL(cpu_subsys);
 
 static DEFINE_PER_CPU(struct device *, cpu_sys_devices);
 
+extern void extension_ram_log_01(char *client_data);
+extern void extension_ram_log_02(char *client_data);
+
 #ifdef CONFIG_HOTPLUG_CPU
 static ssize_t show_online(struct device *dev,
 			   struct device_attribute *attr,
@@ -45,11 +48,21 @@ static ssize_t __ref store_online(struct device *dev,
 	switch (buf[0]) {
 	case '0':
 		ret = cpu_down(cpu->dev.id);
+		if (cpu->dev.id == 0) {
+			extension_ram_log_01("cpu:0 offline\n");
+		} else if (cpu->dev.id == 1) {
+			extension_ram_log_02("cpu:1 offline\n");
+		}
 		if (!ret)
 			kobject_uevent(&dev->kobj, KOBJ_OFFLINE);
 		break;
 	case '1':
 		ret = cpu_up(cpu->dev.id);
+		if (cpu->dev.id == 0) {
+			extension_ram_log_01("cpu:0 online\n");
+		} else if (cpu->dev.id == 1) {
+			extension_ram_log_02("cpu:1 online\n");
+		}
 		if (!ret)
 			kobject_uevent(&dev->kobj, KOBJ_ONLINE);
 		break;

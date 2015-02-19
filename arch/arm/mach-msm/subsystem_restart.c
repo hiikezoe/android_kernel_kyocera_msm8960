@@ -34,6 +34,7 @@
 #include <mach/socinfo.h>
 #include <mach/subsystem_notif.h>
 #include <mach/subsystem_restart.h>
+#include <mach/oem_fact.h>
 
 #include "smd_private.h"
 
@@ -92,6 +93,13 @@ static LIST_HEAD(subsystem_list);
 static DEFINE_MUTEX(subsystem_list_lock);
 static DEFINE_MUTEX(soc_order_reg_lock);
 static DEFINE_MUTEX(restart_log_mutex);
+
+extern void set_kcj_crash_info(void);
+extern void dump_kcj_log(void);
+extern void set_modemlog_info(void);
+extern void set_smem_crash_system_kernel(void);
+extern void set_smem_crash_kind_panic(void);
+extern void set_smem_crash_info_data( const char *pdata );
 
 /* SOC specific restart orders go here */
 
@@ -433,6 +441,10 @@ static void subsystem_restart_wq_func(struct work_struct *work)
 	 */
 	mutex_unlock(shutdown_lock);
 
+	set_modemlog_info();
+	set_kcj_crash_info();
+	dump_kcj_log();
+    
 	/* Collect ram dumps for all subsystems in order here */
 	for_each_subsys_device(list, count, NULL, subsystem_ramdump);
 
@@ -582,6 +594,10 @@ static int ssr_panic_handler(struct notifier_block *this,
 {
 	struct subsys_device *dev;
 
+	set_smem_crash_system_kernel();
+	set_smem_crash_kind_panic();
+	set_smem_crash_info_data( " " );
+    
 	list_for_each_entry(dev, &subsystem_list, list)
 		if (dev->desc->crash_shutdown)
 			dev->desc->crash_shutdown(dev->desc);
@@ -629,16 +645,21 @@ static int __init ssr_init_soc_restart_orders(void)
 		mutex_init(&restart_orders[i]->shutdown_lock);
 	}
 
-	if (restart_orders == NULL || n_restart_orders < 1) {
-		WARN_ON(1);
-	}
-
 	return 0;
 }
 
 static int __init subsys_restart_init(void)
 {
+	int opt_bit;
+
+	restart_level = RESET_SUBSYS_INDEPENDENT;
+
+	opt_bit = oem_fact_get_option_bit(OEM_FACT_OPTION_ITEM_02, 0x02);
+	if(opt_bit == 1)
+	{
 	restart_level = RESET_SOC;
+		pr_info("Phase %d behavior activated.\n", restart_level);
+	}
 
 	ssr_wq = alloc_workqueue("ssr_wq", WQ_CPU_INTENSIVE, 0);
 	if (!ssr_wq)

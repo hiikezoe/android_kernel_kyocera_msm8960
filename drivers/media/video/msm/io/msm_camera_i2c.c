@@ -502,6 +502,38 @@ int32_t msm_camera_i2c_read(struct msm_camera_i2c_client *client,
 	return rc;
 }
 
+int32_t msm_camera_i2c_read_act(struct msm_camera_i2c_client *client,
+	uint16_t *data,	enum msm_camera_i2c_data_type data_type)
+{
+	int32_t rc = -EFAULT;
+	unsigned char buf[MSM_CAMERA_I2C_WORD_DATA];
+
+	rc = msm_camera_i2c_rxdata(client, buf, data_type);
+
+	*data = buf[0] << 8 | buf[1];
+
+	pr_err("%s data: 0x%x\n", __func__, *data);
+	return rc;
+}
+int32_t msm_camera_i2c_rxdata_act(struct msm_camera_i2c_client *dev_client,
+	unsigned char *rxdata, int data_length)
+{
+	int32_t rc = 0;
+	uint16_t saddr = dev_client->client->addr >> 1;
+	struct i2c_msg msgs[] = {
+		{
+			.addr  = saddr,
+			.flags = I2C_M_RD,
+			.len   = data_length,
+			.buf   = rxdata,
+		},
+	};
+	rc = i2c_transfer(dev_client->client->adapter, msgs, 1);
+	if (rc < 0)
+		pr_err("msm_camera_i2c_rxdata failed 0x%x\n", saddr);
+	return rc;
+}
+
 int32_t msm_camera_i2c_read_seq(struct msm_camera_i2c_client *client,
 	uint16_t addr, uint8_t *data, uint16_t num_byte)
 {

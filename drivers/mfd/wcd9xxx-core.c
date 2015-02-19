@@ -1376,6 +1376,7 @@ static const struct slim_device_id slimtest_id[] = {
 	{}
 };
 
+#if 0
 static struct slim_driver tabla_slim_driver = {
 	.driver = {
 		.name = "tabla-slim",
@@ -1387,6 +1388,7 @@ static struct slim_driver tabla_slim_driver = {
 	.resume = wcd9xxx_slim_resume,
 	.suspend = wcd9xxx_slim_suspend,
 };
+#endif
 
 static const struct slim_device_id slimtest2x_id[] = {
 	{"tabla2x-slim", 0},
@@ -1451,8 +1453,11 @@ static struct i2c_driver tabla_i2c_driver = {
 static int __init wcd9xxx_init(void)
 {
 	int ret1, ret2, ret3, ret4, ret5, ret6;
-
+#if 0
 	ret1 = slim_driver_register(&tabla_slim_driver);
+#else
+    ret1 = 0;
+#endif
 	if (ret1 != 0)
 		pr_err("Failed to register tabla SB driver: %d\n", ret1);
 

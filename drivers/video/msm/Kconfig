@@ -189,6 +189,11 @@ config FB_MSM_MIPI_DSI_RENESAS
 	select FB_MSM_MIPI_DSI
 	default n
 
+config FB_MSM_MIPI_DSI_NOVATEK_CMD
+	bool
+	select FB_MSM_MIPI_DSI
+	default n
+
 config FB_MSM_MIPI_DSI_TRULY
 	bool
 	select FB_MSM_MIPI_DSI
@@ -364,6 +369,11 @@ config FB_MSM_MIPI_RENESAS_VIDEO_FWVGA_PT
 config FB_MSM_MIPI_RENESAS_CMD_FWVGA_PT
 	bool
 	select FB_MSM_MIPI_DSI_RENESAS
+	default n
+
+config FB_MSM_MIPI_NOVATEK_CMD_WXGA_PT
+	bool
+	select FB_MSM_MIPI_DSI_NOVATEK_CMD
 	default n
 
 config FB_MSM_MIPI_NT35510_VIDEO_WVGA_PT
@@ -563,6 +573,7 @@ config FB_MSM_MIPI_PANEL_DETECT
 	select FB_MSM_MIPI_TOSHIBA_VIDEO_WUXGA
 	select FB_MSM_MIPI_RENESAS_VIDEO_FWVGA_PT
 	select FB_MSM_MIPI_RENESAS_CMD_FWVGA_PT
+	select FB_MSM_MIPI_NOVATEK_CMD_WXGA_PT
 	select FB_MSM_MIPI_TRULY_VIDEO_WVGA_PT
 	select FB_MSM_MIPI_NOVATEK_VIDEO_QHD_PT
 	select FB_MSM_MIPI_NOVATEK_CMD_QHD_PT
@@ -608,6 +619,7 @@ config FB_MSM_LCDC_MIPI_PANEL_AUTO_DETECT
 	select FB_MSM_MIPI_TOSHIBA_VIDEO_WSVGA_PT
 	select FB_MSM_MIPI_RENESAS_VIDEO_FWVGA_PT
 	select FB_MSM_MIPI_RENESAS_CMD_FWVGA_PT
+	select FB_MSM_MIPI_NOVATEK_CMD_WXGA_PT
 	select FB_MSM_MIPI_NOVATEK_VIDEO_QHD_PT
 	select FB_MSM_MIPI_NOVATEK_CMD_QHD_PT
 	select FB_MSM_MIPI_NT35510_VIDEO_WVGA_PT
@@ -630,6 +642,7 @@ config FB_MSM_LVDS_MIPI_PANEL_DETECT
 	select FB_MSM_MIPI_TOSHIBA_VIDEO_WUXGA
 	select FB_MSM_MIPI_RENESAS_VIDEO_FWVGA_PT
 	select FB_MSM_MIPI_RENESAS_CMD_FWVGA_PT
+	select FB_MSM_MIPI_NOVATEK_CMD_WXGA_PT
 	select FB_MSM_MIPI_TRULY_VIDEO_WVGA_PT
 	select FB_MSM_MIPI_NOVATEK_VIDEO_QHD_PT
 	select FB_MSM_MIPI_NOVATEK_CMD_QHD_PT
@@ -713,6 +726,10 @@ config FB_MSM_MIPI_RENESAS_VIDEO_FWVGA_PT_PANEL
 config FB_MSM_MIPI_RENESAS_CMD_FWVGA_PT_PANEL
 	bool "MIPI Renesas Command FWVGA PT Panel"
 	select FB_MSM_MIPI_RENESAS_CMD_FWVGA_PT
+
+config FB_MSM_MIPI_NOVATEK_CMD_WXGA_PT_PANEL
+	bool "MIPI Novatek Command 720P_PT Panel"
+	select FB_MSM_MIPI_NOVATEK_CMD_WXGA_PT
 
 config FB_MSM_MIPI_CHIMEI_WXGA_PANEL
 	bool "MIPI Chimei WXGA PT Panel"
@@ -1001,6 +1018,52 @@ config FB_MSM_EBI2_PANEL_DETECT
 	default n
 	---help---
 	  Support for EBI2 panel auto detect
+
+config DISP_EXT_REFRESH
+	bool "To enable the display refresh function"
+	default y
+	---help---
+	  Say Y here if you want to enable the refresh function of your display.
+config DISP_EXT_BOARD
+	bool "Enables the detection function of the display board"
+	default y
+	---help---
+	  Say Y here if you want to enable the detection function of your display.
+config DISP_EXT_BLC
+	bool "To enable the display backlight function"
+	default y
+	---help---
+	  Say Y here if you want to enable the backlight function of your display.
+config DISP_EXT_DIAG
+	bool "To enable the display diag function"
+	default y
+	---help---
+	  Say Y here if you want to enable the diag function of your display.
+config DISP_EXT_PROPERTY
+	bool "To enable the display property function"
+	default y
+	---help---
+	  Say Y here if you want to enable the property function of your display.
+config DISP_EXT_UTIL
+	bool "To enable the display utility"
+	default y
+	---help---
+	  Say Y here if you want to enable the utility of your display.
+config DISP_EXT_UTIL_GET_RATE
+	bool "To enable feature get refresh rate"
+	default y
+	---help---
+	  Say Y here if you want to enable feature get refresh rate.
+config DISP_UTIL_DSI_CLK_OFF
+	bool "To enable feature dsi clock off"
+	default y
+	---help---
+	  Say Y here if you want to enable feature dsi clock off.
+config DISP_EXT_UTIL_VSYNC
+	bool "To enable feature tune vsync"
+	default y
+	---help---
+	  Say Y here if you want to enable feature tune vsync.
 
 if FB_MSM_MDSS
 	source "drivers/video/msm/mdss/Kconfig"

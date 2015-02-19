@@ -39,6 +39,57 @@ static int vnode_count;
 module_param(msm_camera_v4l2_nr, uint, 0644);
 MODULE_PARM_DESC(msm_camera_v4l2_nr, "videoX start number, -1 is autodetect");
 
+int32_t msm_camera_evt_notify(struct msm_cam_media_controller *pmctl, uint8_t msg_id)
+{
+	int32_t rc = 0;
+	struct video_device *vdev;
+	struct v4l2_event ev;
+	struct msm_isp_event_ctrl *isp_event;
+
+	CDBG("%s: E msg_id = %d\n", __func__, msg_id);
+
+	if (!pmctl) {
+		pr_err("%s: no context \n", __func__);
+		rc = -1;
+		return rc;
+	}
+	isp_event = kzalloc(sizeof(struct msm_isp_event_ctrl), GFP_KERNEL);
+	if (!isp_event) {
+		pr_err("%s Insufficient memory. return", __func__);
+		rc = -1;
+		return rc;
+	}
+
+	if (pmctl->config_device == NULL) {
+		pr_err("%s: no config_device \n", __func__);
+		rc = -1;
+		kfree(isp_event);
+		return rc;
+	}
+	if (pmctl->config_device->config_stat_event_queue.pvdev == NULL) {
+		pr_err("%s: no vdev \n", __func__);
+		rc = -1;
+		kfree(isp_event);
+		return rc;
+	}
+
+	vdev = pmctl->config_device->config_stat_event_queue.pvdev;
+
+	ev.type = V4L2_EVENT_PRIVATE_START + MSM_CAM_RESP_STAT_EVT_MSG;
+	*((uint32_t *)ev.u.data) = (uint32_t)isp_event;
+	isp_event->resptype = MSM_CAM_RESP_STAT_EVT_MSG;
+	isp_event->isp_data.isp_msg.type = MSM_CAMERA_MSG;
+	isp_event->isp_data.isp_msg.len = 0;
+	isp_event->isp_data.isp_msg.msg_id = msg_id;
+	getnstimeofday(&(isp_event->isp_data.isp_msg.timestamp));
+
+	CDBG("%s: v4l2_event_queue call vdev = %p\n", __func__, vdev);
+	v4l2_event_queue(vdev, &ev);
+
+	CDBG("%s: X rc = %d\n", __func__, rc);
+	return rc;
+}
+
 /* callback function from all subdevices of a msm_cam_v4l2_device */
 static void msm_cam_v4l2_subdev_notify(struct v4l2_subdev *sd,
 				unsigned int notification, void *arg)

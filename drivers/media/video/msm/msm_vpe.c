@@ -478,6 +478,10 @@ static void vpe_send_outmsg(void)
 		spin_unlock_irqrestore(&vpe_ctrl->lock, flags);
 		return;
 	}
+	if( vpe_ctrl->pp_frame_info == NULL){
+		spin_unlock_irqrestore(&vpe_ctrl->lock, flags);
+		return;
+	}
 	event_qcmd = kzalloc(sizeof(struct msm_queue_cmd), GFP_ATOMIC);
 	atomic_set(&event_qcmd->on_heap, 1);
 	event_qcmd->command = (void *)vpe_ctrl->pp_frame_info;
@@ -586,6 +590,7 @@ int vpe_disable(struct msm_cam_media_controller *mctl)
 	int rc = 0;
 	unsigned long flags = 0;
 	D("%s", __func__);
+	vpe_send_outmsg();
 	spin_lock_irqsave(&vpe_ctrl->lock, flags);
 	if (vpe_ctrl->state == VPE_STATE_IDLE) {
 		D("%s: VPE already disabled", __func__);

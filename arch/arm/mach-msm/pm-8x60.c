@@ -78,6 +78,14 @@ module_param_named(
 );
 static int msm_pm_retention_tz_call;
 
+#define DIAG_PWROFF_MODE_CMD_ONLY         0x01
+#define DIAG_PWROFF_MODE_CMD_WITH_ENDSEQ  0x02
+#define DIAG_PWROFF_MODE_COMPLETE         0xFF
+static unsigned short pwroff_mode = 0;
+
+extern void extension_ram_log_01(char *client_data);
+extern void extension_ram_log_02(char *client_data);
+
 /******************************************************************************
  * Sleep Modes and Parameters
  *****************************************************************************/
@@ -119,6 +127,47 @@ static char *msm_pm_sleep_mode_labels[MSM_PM_SLEEP_MODE_NR] = {
 };
 
 static struct hrtimer pm_hrtimer;
+
+bool msm_is_pwroff_mode(void){
+	if (pwroff_mode == DIAG_PWROFF_MODE_CMD_WITH_ENDSEQ){
+		return true;
+	}else{
+		return false;
+	}
+}
+
+void msm_set_pwroff_complete(void){
+	pwroff_mode = DIAG_PWROFF_MODE_COMPLETE;
+}
+
+static ssize_t msm_pwroff_mode_show(struct kobject *kobj,
+						struct kobj_attribute *attr, char *buf)
+{
+	printk(KERN_DEBUG "msm_pwroff_mode_show\n");
+	return sprintf(buf, "%hu\n", pwroff_mode);
+}
+
+static ssize_t msm_pwroff_mode_store(struct kobject *kobj,
+				struct kobj_attribute *attr, const char * buf, size_t n)
+{
+	unsigned short value = 0;
+
+	printk(KERN_DEBUG "msm_pwroff_mode_store\n");
+	if (sscanf(buf, "%hu", &value) != 1 ||
+		value > DIAG_PWROFF_MODE_CMD_WITH_ENDSEQ)
+	{
+		printk(KERN_ERR "Invalid value\n");
+		return -EINVAL;
+	}
+	printk(KERN_DEBUG "value=%d\n", value);
+	pwroff_mode = value;
+
+	return n;
+}
+
+static struct kobj_attribute pwroff_mode_attr =
+		__ATTR(pwroff_mode, 0644, msm_pwroff_mode_show, msm_pwroff_mode_store);
+
 static struct msm_pm_sleep_ops pm_sleep_ops;
 static struct msm_pm_sleep_status_data *msm_pm_slp_sts;
 /*
@@ -320,6 +369,13 @@ static int __init msm_pm_mode_sysfs_add(void)
 	for_each_possible_cpu(cpu) {
 		ret = msm_pm_mode_sysfs_add_cpu(cpu, modes_kobj);
 		if (ret)
+			goto mode_sysfs_add_exit;
+	}
+
+	ret = sysfs_create_file(module_kobj, &pwroff_mode_attr.attr);
+	if( ret < 0 ) {
+		pr_err("%s: cannot add sysfs entry for power off mode\n",
+				__func__);
 			goto mode_sysfs_add_exit;
 	}
 
@@ -555,7 +611,20 @@ static bool __ref msm_pm_spm_power_collapse(
 #ifdef CONFIG_VFP
 	vfp_pm_suspend();
 #endif
+
+	if (cpu == 0) {
+		extension_ram_log_01("msm_pm_collapse() enter\n");
+	} else if (cpu == 1) {
+		extension_ram_log_02("msm_pm_collapse() enter\n");
+	}
+
 	collapsed = msm_pm_l2x0_power_collapse();
+
+	if (cpu == 0) {
+		extension_ram_log_01("msm_pm_collapse() exit\n");
+	} else if (cpu == 1) {
+		extension_ram_log_02("msm_pm_collapse() exit\n");
+	}
 
 	msm_pm_boot_config_after_pc(cpu);
 
@@ -1043,7 +1112,7 @@ static int msm_pm_enter(suspend_state_t state)
 		int collapsed = 0;
 
 		if (MSM_PM_DEBUG_SUSPEND & msm_pm_debug_mask)
-			pr_info("%s: power collapse\n", __func__);
+			pr_info("checkpoint: %s: power collapse\n", __func__);
 
 		clock_debug_print_enabled();
 
@@ -1097,7 +1166,7 @@ static int msm_pm_enter(suspend_state_t state)
 
 enter_exit:
 	if (MSM_PM_DEBUG_SUSPEND & msm_pm_debug_mask)
-		pr_info("%s: return\n", __func__);
+		pr_info("checkpoint: %s: return\n", __func__);
 
 	return 0;
 }

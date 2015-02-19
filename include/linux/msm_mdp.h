@@ -81,6 +81,17 @@
 #define MDP_IMGTYPE2_START 0x10000
 #define MSMFB_DRIVER_VERSION	0xF9E8D701
 
+#define MSMFB_MIPI_REG_WRITE  _IOW(MSMFB_IOCTL_MAGIC, 170, struct disp_diag_mipi_reg_type)
+#define MSMFB_MIPI_REG_READ   _IOWR(MSMFB_IOCTL_MAGIC, 171, struct disp_diag_mipi_reg_type)
+#define MSMFB_DISPLAY_STANDBY _IOW(MSMFB_IOCTL_MAGIC, 172, unsigned int)
+#define MSMFB_GET_STATUS  _IOR(MSMFB_IOCTL_MAGIC, 173, struct local_disp_state_type)
+#define MSMFB_GET_REF_SW  _IOR(MSMFB_IOCTL_MAGIC, 174, uint8_t)
+#define MSMFB_REFRESH_SEQ _IOW(MSMFB_IOCTL_MAGIC, 175, unsigned int)
+#define MSMFB_CRC_GET     _IOR(MSMFB_IOCTL_MAGIC, 176, uint32_t)
+#define MSMFB_CRC_RESET   _IOW(MSMFB_IOCTL_MAGIC, 177, unsigned int)
+#define MSMFB_CHANGE_TRANSFER_RATE  _IOW(MSMFB_IOCTL_MAGIC, 178, uint32_t)
+#define MSMFB_DISP_MSG_OUT   _IOW(MSMFB_IOCTL_MAGIC, 179, uint8_t)
+
 enum {
 	NOTIFY_UPDATE_START,
 	NOTIFY_UPDATE_STOP,
@@ -130,6 +141,10 @@ enum {
 	HSIC_CON,
 	NUM_HSIC_PARAM,
 };
+
+#define MSMFB_GAMMA_KCJPROP_DATA_NUM 60
+#define MIPI_REFREH_SEQ_ALL            0
+#define MIPI_REFREH_SEQ_LCD            1
 
 #define MDSS_MDP_ROT_ONLY		0x80
 #define MDSS_MDP_RIGHT_MIXER		0x100
@@ -614,6 +629,70 @@ struct msmfb_mixer_info_req {
 enum {
 	DISPLAY_SUBSYSTEM_ID,
 	ROTATOR_SUBSYSTEM_ID,
+};
+struct disp_diag_mipi_reg_type {
+    uint8_t type;
+    /* dcs(DCS Command is User Command, DCS:Display Command Set) read/write */
+    /* DTYPE_DCS_WRITE		0x05	*//* short write, 0 parameter */
+    /* DTYPE_DCS_WRITE1	    0x15	*//* short write, 1 parameter */
+    /* DTYPE_DCS_READ		0x06	*//* read */
+    /* DTYPE_DCS_LWRITE	    0x39	*//* long write */
+
+    /* generic read/write */
+    /* DTYPE_GEN_WRITE		0x03	*//* short write, 0 parameter */
+    /* DTYPE_GEN_WRITE1	    0x13	*//* short write, 1 parameter */
+    /* DTYPE_GEN_WRITE2	    0x23	*//* short write, 2 parameter */
+    /* DTYPE_GEN_LWRITE	    0x29	*//* long write */
+    /* DTYPE_GEN_READ		0x04	*//* long read, 0 parameter */
+    /* DTYPE_GEN_READ1		0x14	*//* long read, 1 parameter */
+    /* DTYPE_GEN_READ2		0x24	*//* long read, 2 parameter */
+    uint8_t wait;
+    uint8_t len;
+    uint8_t r_size;
+    uint8_t  data[25];
+};
+
+typedef enum {
+    LOCAL_DISPLAY_DEF = 0,
+    LOCAL_DISPLAY_POWER_OFF,
+    LOCAL_DISPLAY_POWER_ON,
+    LOCAL_DISPLAY_ON,
+    LOCAL_DISPLAY_OFF,
+    LOCAL_DISPLAY_TERM
+} local_disp_state_enum;
+
+struct local_disp_state_type {
+    uint32_t                   crc_error_state;
+    uint32_t                   crc_error_count;
+    uint32_t                   refresh_1stupdate_flg;
+    local_disp_state_enum      disp_state;
+    uint8_t                    first_dispon_flg;
+};
+
+struct fb_kcjprop_data
+{
+    int rw_display_cabc_valid;
+    int rw_display_gamma_normal_valid;
+    int rw_display_gamma_blind_valid;
+    int rw_display_reflesh_valid;
+    uint8_t  rw_display_cabc;
+    uint8_t  rw_display_gamma_normal_r_plus[MSMFB_GAMMA_KCJPROP_DATA_NUM];
+    uint8_t  rw_display_gamma_normal_r_minus[MSMFB_GAMMA_KCJPROP_DATA_NUM];
+    uint8_t  rw_display_gamma_normal_g_plus[MSMFB_GAMMA_KCJPROP_DATA_NUM];
+    uint8_t  rw_display_gamma_normal_g_minus[MSMFB_GAMMA_KCJPROP_DATA_NUM];
+    uint8_t  rw_display_gamma_normal_b_plus[MSMFB_GAMMA_KCJPROP_DATA_NUM];
+    uint8_t  rw_display_gamma_normal_b_minus[MSMFB_GAMMA_KCJPROP_DATA_NUM];
+    uint8_t  rw_display_gamma_blind_r_plus[MSMFB_GAMMA_KCJPROP_DATA_NUM];
+    uint8_t  rw_display_gamma_blind_r_minus[MSMFB_GAMMA_KCJPROP_DATA_NUM];
+    uint8_t  rw_display_gamma_blind_g_plus[MSMFB_GAMMA_KCJPROP_DATA_NUM];
+    uint8_t  rw_display_gamma_blind_g_minus[MSMFB_GAMMA_KCJPROP_DATA_NUM];
+    uint8_t  rw_display_gamma_blind_b_plus[MSMFB_GAMMA_KCJPROP_DATA_NUM];
+    uint8_t  rw_display_gamma_blind_b_minus[MSMFB_GAMMA_KCJPROP_DATA_NUM];
+    uint8_t  rw_display_reflesh;
+};
+struct disp_diag_message_out {
+    uint8_t type;
+    uint8_t level;
 };
 
 enum {

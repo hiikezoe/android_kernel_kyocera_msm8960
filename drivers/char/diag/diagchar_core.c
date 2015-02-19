@@ -43,6 +43,9 @@
 #include "diag_masks.h"
 #include "diagfwd_bridge.h"
 
+#include <mach/scm.h>
+#include <mach/restart.h>
+
 MODULE_DESCRIPTION("Diag Char Driver");
 MODULE_LICENSE("GPL v2");
 MODULE_VERSION("1.0");
@@ -68,7 +71,7 @@ static unsigned int itemsize_write_struct = 20; /*Size of item in the mempool */
 static unsigned int poolsize_write_struct = 10;/* Num of items in the mempool */
 /* This is the max number of user-space clients supported at initialization*/
 static unsigned int max_clients = 15;
-static unsigned int threshold_client_limit = 30;
+static unsigned int threshold_client_limit = 50;
 /* This is the maximum number of pkt registrations supported at initialization*/
 int diag_max_reg = 600;
 int diag_threshold_reg = 750;
@@ -1129,6 +1132,11 @@ long diagchar_ioctl(struct file *filp,
 		else
 			result = 1;
 		break;
+	case DIAG_IOCTL_OEM_KC_01:
+		result = scm_call_atomic1(254, 2, (int)ioarg);
+		if (!result) {
+			msm_set_restart_mode(RESTART_OEM);
+		}
 	}
 	return result;
 }

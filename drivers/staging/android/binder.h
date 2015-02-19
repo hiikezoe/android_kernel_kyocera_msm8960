@@ -326,5 +326,6 @@ enum BinderDriverCommandProtocol {
 	 */
 };
 
+const char *binder_get_ioctl_name(int cmd);
 #endif /* _LINUX_BINDER_H */
 

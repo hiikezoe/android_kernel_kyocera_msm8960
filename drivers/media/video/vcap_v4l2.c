@@ -59,9 +59,9 @@ static unsigned debug;
 			printk(KERN_DEBUG "VCAP: " fmt, ## arg);	\
 	} while (0)
 
-int vcap_reg_powerup(struct vcap_dev *dev)
+int vcap_reg_powerup(struct vcap_dev *dev, struct device *ddev)
 {
-	dev->fs_vcap = regulator_get(NULL, "fs_vcap");
+	dev->fs_vcap = regulator_get(ddev, "vdd");
 	if (IS_ERR(dev->fs_vcap)) {
 		pr_err("%s: Regulator FS_VCAP get failed %ld\n", __func__,
 			PTR_ERR(dev->fs_vcap));
@@ -245,7 +245,7 @@ int vcap_enable(struct vcap_dev *dev, struct device *ddev,
 {
 	int rc;
 
-	rc = vcap_reg_powerup(dev);
+	rc = vcap_reg_powerup(dev, ddev);
 	if (rc < 0)
 		goto reg_failed;
 	rc = vcap_clk_powerup(dev, ddev, rate);

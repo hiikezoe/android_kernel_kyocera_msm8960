@@ -16,7 +16,6 @@
  * GNU General Public License for more details.
  *
  */
-
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/io.h>
@@ -43,15 +42,22 @@
  * and should work as-is for any target without stacked memory.
  */
 unsigned int msm_shared_ram_phys = 0x00100000;
+unsigned int msm_uninit_ram_phys = 0x90300000;
 
 static void __init msm_map_io(struct map_desc *io_desc, int size)
 {
 	int i;
 
 	BUG_ON(!size);
-	for (i = 0; i < size; i++)
-		if (io_desc[i].virtual == (unsigned long)MSM_SHARED_RAM_BASE)
+    for (i = 0; i < size; i++) {
+        if (io_desc[i].virtual == (unsigned long)MSM_SHARED_RAM_BASE) {
 			io_desc[i].pfn = __phys_to_pfn(msm_shared_ram_phys);
+            printk( KERN_INFO "SHARED:virt=0x%08lx, pfn=%d\n", (unsigned long)io_desc[i].virtual, (int)io_desc[i].pfn );
+        } else if (io_desc[i].virtual == (unsigned long)MSM_UNINIT_RAM_BASE) {
+            io_desc[i].pfn = __phys_to_pfn(msm_uninit_ram_phys);
+            printk( KERN_INFO "UNINIT:virt=0x%08lx, pfn=%d\n", (unsigned long)io_desc[i].virtual, (int)io_desc[i].pfn );
+        }
+    }
 
 	iotable_init(io_desc, size);
 }
@@ -200,6 +206,11 @@ static struct map_desc msm8960_io_desc[] __initdata = {
 		.length =   MSM_SHARED_RAM_SIZE,
 		.type =     MT_DEVICE,
 	},
+    {
+        .virtual =  (unsigned long) MSM_UNINIT_RAM_BASE,
+        .length =   MSM_UNINIT_RAM_SIZE,
+        .type =     MT_DEVICE,
+    },
 #ifdef CONFIG_DEBUG_MSM8960_UART
 	MSM_DEVICE(DEBUG_UART),
 #endif

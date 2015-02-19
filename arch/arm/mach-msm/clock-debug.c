@@ -23,6 +23,8 @@
 #include <linux/clkdev.h>
 #include <mach/clk-provider.h>
 
+#include <asm-generic/gpio.h>
+
 #include "clock.h"
 
 static int clock_debug_rate_set(void *data, u64 val)
@@ -388,4 +390,5 @@ void clock_debug_print_enabled(void)
 	else
 		pr_info("No clocks enabled.\n");
 
+	kc_gpio_debug_print_enabled();
 }

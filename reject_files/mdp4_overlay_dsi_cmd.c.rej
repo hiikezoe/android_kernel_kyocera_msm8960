@@ -1,0 +1,14 @@
+--- drivers/video/msm/mdp4_overlay_dsi_cmd.c
++++ drivers/video/msm/mdp4_overlay_dsi_cmd.c
+@@ -807,6 +824,11 @@
+ 		else
+ 			start_y = (mfd->total_lcd_lines - 1) -
+ 				(vsync_start_y_adjust - pipe->dst_y);
++
++#ifdef CONFIG_DISP_EXT_UTIL_VSYNC
++		start_y = disp_ext_util_vsync_cal_start(start_y);
++#endif /*CONFIG_DISP_EXT_UTIL_VSYNC*/
++
+ 		if (which == 0)
+ 			MDP_OUTP(MDP_BASE + 0x210, start_y);	/* primary */
+ 		else

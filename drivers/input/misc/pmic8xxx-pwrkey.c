@@ -22,10 +22,20 @@
 
 #include <linux/mfd/pm8xxx/core.h>
 #include <linux/input/pmic8xxx-pwrkey.h>
+#include <linux/key_dm_driver.h>
 
 #define PON_CNTL_1 0x1C
 #define PON_CNTL_PULL_UP BIT(7)
 #define PON_CNTL_TRIG_DELAY_MASK (0x7)
+
+#ifdef PWRKEY_DEBUG
+#define PWRKEY_DBG_PRINT(fmt, ...) printk(KERN_DEBUG fmt, ##__VA_ARGS__)
+#else 
+#define PWRKEY_DBG_PRINT(fmt, ...) 
+#endif
+#define PWRKEY_INFO_PRINT(fmt, ...) printk(KERN_INFO fmt, ##__VA_ARGS__)
+
+static bool g_kdm_pwrkey_check = false;
 
 /**
  * struct pmic8xxx_pwrkey - pmic8xxx pwrkey information
@@ -51,8 +61,18 @@ static irqreturn_t pwrkey_press_irq(int irq, void *_pwrkey)
 		pwrkey->press = true;
 	}
 
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	input_report_key(pwrkey->pwr, KEY_POWER, 1);
 	input_sync(pwrkey->pwr);
+#else
+	PWRKEY_INFO_PRINT("checkpoint: %s: %x\n", __func__, g_kdm_pwrkey_check);
+	if (g_kdm_pwrkey_check) {
+			key_set_code(KEY_POWER);
+	} else {
+	input_report_key(pwrkey->pwr, KEY_POWER, 1);
+	input_sync(pwrkey->pwr);
+	}
+#endif /* QUALCOMM_ORIGINAL_FEATURE */
 
 	return IRQ_HANDLED;
 }
@@ -69,11 +89,45 @@ static irqreturn_t pwrkey_release_irq(int irq, void *_pwrkey)
 		pwrkey->press = false;
 	}
 
+#ifdef QUALCOMM_ORIGINAL_FEATURE
 	input_report_key(pwrkey->pwr, KEY_POWER, 0);
 	input_sync(pwrkey->pwr);
+#else
+	PWRKEY_INFO_PRINT("checkpoint: %s: %x\n", __func__, g_kdm_pwrkey_check);
+	if (g_kdm_pwrkey_check) {
+			key_set_code(KEY_POWER);
+	} else {
+	input_report_key(pwrkey->pwr, KEY_POWER, 0);
+	input_sync(pwrkey->pwr);
+	}
+#endif /* QUALCOMM_ORIGINAL_FEATURE */
 
 	return IRQ_HANDLED;
 }
+
+unsigned char pwrkey_cmd(unsigned char cmd, int *val)
+{
+	uint8_t ret = 1;
+
+	PWRKEY_DBG_PRINT("%s: cmd:%d\n", __func__, cmd);
+	switch (cmd) {
+	case KEY_DM_CHECK_COMMAND:
+		PWRKEY_DBG_PRINT("%s: %x %x\n", __func__, g_kdm_pwrkey_check, val[0]);
+		if (val[0]) {
+			g_kdm_pwrkey_check = true;
+		} else {
+			g_kdm_pwrkey_check = false;
+		}
+		ret = 0;
+		break;
+
+	default:
+		printk(KERN_ERR "%s: %d\n", __func__, cmd);
+		break;
+	}
+	return ret;
+}
+EXPORT_SYMBOL(pwrkey_cmd);
 
 #ifdef CONFIG_PM_SLEEP
 static int pmic8xxx_pwrkey_suspend(struct device *dev)

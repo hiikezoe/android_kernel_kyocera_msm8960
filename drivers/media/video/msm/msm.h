@@ -446,6 +446,7 @@ struct msm_cam_server_queue {
 	uint32_t queue_active;
 	struct msm_device_queue ctrl_q;
 	struct msm_device_queue eventData_q;
+	struct msm_ctrl_cmd *ctrl;
 	uint8_t *ctrl_data;
 	uint32_t evt_id;
 };
@@ -724,6 +725,7 @@ int msm_cam_register_subdev_node(struct v4l2_subdev *sd,
 	struct msm_cam_subdev_info *sd_info);
 int msm_mctl_find_sensor_subdevs(struct msm_cam_media_controller *p_mctl,
 	int core_index);
+int32_t msm_camera_evt_notify(struct msm_cam_media_controller *pmctl, uint8_t msg_id);
 int msm_server_open_client(int *p_qidx);
 int msm_server_send_ctrl(struct msm_ctrl_cmd *out, int ctrl_id);
 int msm_server_close_client(int idx);

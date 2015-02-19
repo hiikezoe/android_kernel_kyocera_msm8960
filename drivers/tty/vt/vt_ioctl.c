@@ -7,6 +7,21 @@
  *  Some code moved for less code duplication - Andi Kleen - Mar 1997
  *  Check put/get_user, cleanups - acme@conectiva.com.br - Jun 2001
  */
+/*
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+*/
 
 #include <linux/types.h>
 #include <linux/errno.h>
@@ -124,8 +139,10 @@ static void __vt_event_queue(struct vt_event_wait *vw)
 
 static void __vt_event_wait(struct vt_event_wait *vw)
 {
+	int timer_inval = (100 * HZ)/1000;
+
 	/* Wait for it to pass */
-	wait_event_interruptible(vt_event_waitqueue, vw->done);
+	wait_event_interruptible_timeout(vt_event_waitqueue, vw->done, timer_inval);
 }
 
 static void __vt_event_dequeue(struct vt_event_wait *vw)

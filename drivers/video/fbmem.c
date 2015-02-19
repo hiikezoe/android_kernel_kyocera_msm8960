@@ -35,6 +35,16 @@
 
 #include <asm/fb.h>
 
+/* #undef FB_DEBUG_LOG */
+#define FB_DEBUG_LOG
+
+extern uint8_t fb_dbg_msg_level;
+#ifdef FB_DEBUG_LOG
+#define FB_MSG_NOTICE(fmt, arg...)   \
+          if(fb_dbg_msg_level>0) printk(KERN_NOTICE fmt, ## arg);
+#else
+#define FB_MSG_NOTICE(fmt, arg...)
+#endif
 
     /*
      *  Frame buffer device initialization and setup routines
@@ -46,6 +56,10 @@ static DEFINE_MUTEX(registration_lock);
 struct fb_info *registered_fb[FB_MAX] __read_mostly;
 int num_registered_fb __read_mostly;
 
+int fb_dm_flag = 0x00;
+#ifdef CONFIG_DISP_EXT_BOARD
+extern int disp_ext_board_get_panel_detect(void);
+#endif /* CONFIG_DISP_EXT_BOARD */
 static struct fb_info *get_fb_info(unsigned int idx)
 {
 	struct fb_info *fb_info;
@@ -746,6 +760,8 @@ fb_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 	int c, cnt = 0, err = 0;
 	unsigned long total_size;
 
+    FB_MSG_NOTICE("DISP fb_read() S\n");
+
 	if (!info || ! info->screen_base)
 		return -ENODEV;
 
@@ -798,6 +814,8 @@ fb_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 
 	kfree(buffer);
 
+    FB_MSG_NOTICE("DISP fb_read() E\n");
+
 	return (err) ? err : cnt;
 }
 
@@ -810,6 +828,8 @@ fb_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 	u8 __iomem *dst;
 	int c, cnt = 0, err = 0;
 	unsigned long total_size;
+
+    FB_MSG_NOTICE("DISP fb_write() S\n");
 
 	if (!info || !info->screen_base)
 		return -ENODEV;
@@ -869,6 +889,8 @@ fb_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 	}
 
 	kfree(buffer);
+
+    FB_MSG_NOTICE("DISP fb_write() E\n");
 
 	return (cnt) ? cnt : err;
 }
@@ -1082,12 +1104,23 @@ static long do_fb_ioctl(struct fb_info *info, unsigned int cmd,
 	case FBIOGET_VSCREENINFO:
 		if (!lock_fb_info(info))
 			return -ENODEV;
+        FB_MSG_NOTICE("DISP FBIOGET_VSCREENINFO S\n");
 		var = info->var;
 		unlock_fb_info(info);
 
 		ret = copy_to_user(argp, &var, sizeof(var)) ? -EFAULT : 0;
+        FB_MSG_NOTICE("DISP FBIOGET_VSCREENINFO E\n");
 		break;
 	case FBIOPUT_VSCREENINFO:
+        if(0x01 == fb_dm_flag) {
+            return 0;
+        }
+#ifdef CONFIG_DISP_EXT_BOARD
+		if(disp_ext_board_get_panel_detect() == -1) {
+			return 0;
+		}
+#endif /* CONFIG_DISP_EXT_BOARD */
+        FB_MSG_NOTICE("DISP FBIOPUT_VSCREENINFO S\n");
 		if (copy_from_user(&var, argp, sizeof(var)))
 			return -EFAULT;
 		if (!lock_fb_info(info))
@@ -1100,14 +1133,17 @@ static long do_fb_ioctl(struct fb_info *info, unsigned int cmd,
 		unlock_fb_info(info);
 		if (!ret && copy_to_user(argp, &var, sizeof(var)))
 			ret = -EFAULT;
+        FB_MSG_NOTICE("DISP FBIOPUT_VSCREENINFO E\n");
 		break;
 	case FBIOGET_FSCREENINFO:
 		if (!lock_fb_info(info))
 			return -ENODEV;
+        FB_MSG_NOTICE("DISP FBIOGET_FSCREENINFO S\n");
 		fix = info->fix;
 		unlock_fb_info(info);
 
 		ret = copy_to_user(argp, &fix, sizeof(fix)) ? -EFAULT : 0;
+        FB_MSG_NOTICE("DISP FBIOGET_FSCREENINFO E\n");
 		break;
 	case FBIOPUTCMAP:
 		if (copy_from_user(&cmap, argp, sizeof(cmap)))
@@ -1124,6 +1160,15 @@ static long do_fb_ioctl(struct fb_info *info, unsigned int cmd,
 		ret = fb_cmap_to_user(&cmap_from, &cmap);
 		break;
 	case FBIOPAN_DISPLAY:
+        if(0x01 == fb_dm_flag) {
+            return 0;
+        }
+#ifdef CONFIG_DISP_EXT_BOARD
+		if(disp_ext_board_get_panel_detect() == -1) {
+			return 0;
+		}
+#endif /* CONFIG_DISP_EXT_BOARD */
+        FB_MSG_NOTICE("DISP FBIOPAN_DISPLAY S\n");
 		if (copy_from_user(&var, argp, sizeof(var)))
 			return -EFAULT;
 		if (!lock_fb_info(info))
@@ -1134,6 +1179,7 @@ static long do_fb_ioctl(struct fb_info *info, unsigned int cmd,
 		unlock_fb_info(info);
 		if (ret == 0 && copy_to_user(argp, &var, sizeof(var)))
 			return -EFAULT;
+        FB_MSG_NOTICE("DISP FBIOPAN_DISPLAY E\n");
 		break;
 	case FBIO_CURSOR:
 		ret = -EINVAL;
@@ -1182,6 +1228,14 @@ static long do_fb_ioctl(struct fb_info *info, unsigned int cmd,
 		console_unlock();
 		unlock_fb_info(info);
 		break;
+    case FBIOPUT_DIAGVALID:
+        FB_MSG_NOTICE("SET do_fb_ioctl(): fb_dm_flag = OFF -----\n");
+        fb_dm_flag = 0x00;
+        break;
+    case FBIOPUT_DIAGINVALID:
+        FB_MSG_NOTICE("SET do_fb_ioctl(): fb_dm_flag = ON -----\n");
+        fb_dm_flag = 0x01;
+        break;
 	default:
 		fb = info->fbops;
 		if (fb->fb_ioctl)
@@ -1196,6 +1250,7 @@ static long fb_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct fb_info *info = file_fb_info(file);
 
+    FB_MSG_NOTICE("CALL fb_ioctl(): cmd = 0x%08x -----\n",(unsigned int)cmd);
 	if (!info)
 		return -ENODEV;
 	return do_fb_ioctl(info, cmd, arg);
@@ -1363,6 +1418,8 @@ fb_mmap(struct file *file, struct vm_area_struct * vma)
 	unsigned long start;
 	u32 len;
 
+    FB_MSG_NOTICE("fb_mmap():start -----\n");
+
 	if (!info)
 		return -ENODEV;
 	if (vma->vm_pgoff > (~0UL >> PAGE_SHIFT))
@@ -1376,6 +1433,7 @@ fb_mmap(struct file *file, struct vm_area_struct * vma)
 		int res;
 		res = fb->fb_mmap(info, vma);
 		mutex_unlock(&info->mm_lock);
+        FB_MSG_NOTICE("fb_mmap():end -----\n");
 		return res;
 	}
 
@@ -1405,6 +1463,7 @@ fb_mmap(struct file *file, struct vm_area_struct * vma)
 	if (io_remap_pfn_range(vma, vma->vm_start, off >> PAGE_SHIFT,
 			     vma->vm_end - vma->vm_start, vma->vm_page_prot))
 		return -EAGAIN;
+    FB_MSG_NOTICE("fb_mmap():end -----\n");
 	return 0;
 }
 
@@ -1417,6 +1476,7 @@ __releases(&info->lock)
 	struct fb_info *info;
 	int res = 0;
 
+    FB_MSG_NOTICE("fb: CALL fb_open()-----");
 	info = get_fb_info(fbidx);
 	if (!info) {
 		request_module("fb%d", fbidx);
@@ -1434,6 +1494,7 @@ __releases(&info->lock)
 	}
 	file->private_data = info;
 	if (info->fbops->fb_open) {
+        FB_MSG_NOTICE("fb_open()--info->fbops->fb_open-----");
 		res = info->fbops->fb_open(info,1);
 		if (res)
 			module_put(info->fbops->owner);
@@ -1456,12 +1517,14 @@ __releases(&info->lock)
 {
 	struct fb_info * const info = file->private_data;
 
+    FB_MSG_NOTICE("fb_release():start -----\n");
 	mutex_lock(&info->lock);
 	if (info->fbops->fb_release)
 		info->fbops->fb_release(info,1);
 	module_put(info->fbops->owner);
 	mutex_unlock(&info->lock);
 	put_fb_info(info);
+    FB_MSG_NOTICE("fb_release():end -----\n");
 	return 0;
 }
 
@@ -1717,6 +1780,7 @@ register_framebuffer(struct fb_info *fb_info)
 {
 	int ret;
 
+printk("%s\n", __PRETTY_FUNCTION__);
 	mutex_lock(&registration_lock);
 	ret = do_register_framebuffer(fb_info);
 	mutex_unlock(&registration_lock);

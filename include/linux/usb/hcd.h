@@ -23,7 +23,13 @@
 
 #include <linux/rwsem.h>
 
+#define __USB_HOST_MODE_HUB_1__
+
+#ifdef __USB_HOST_MODE_HUB_1__
+#define MAX_TOPO_LEVEL		2
+#else // __USB_HOST_MODE_HUB_1__
 #define MAX_TOPO_LEVEL		6
+#endif // __USB_HOST_MODE_HUB_1__
 
 /* This file contains declarations of usbcore internals that are mostly
  * used or exposed by Host Controller Drivers.

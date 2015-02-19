@@ -1,0 +1,173 @@
+#
+# This software is contributed or developed by KYOCERA Corporation.
+# (C) 2012 KYOCERA Corporation
+# (C) 2013 KYOCERA Corporation
+#
+#
+# Copyright (c) 2010 Yamaha Corporation
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301,
+# USA.
+#
+config INPUT_YAS_ACCELEROMETER
+	tristate "YAS Acceleration Sensor"
+	depends on I2C
+	default n
+
+config INPUT_ML610Q793_ACCELEROMETER
+	tristate "ML610Q793 Acceleration Sensor"
+	default y
+
+config INPUT_YAS_ACCELEROMETER_POSITION
+	int "YAS Acceleration Sensor Mounting Position on Board"
+	depends on INPUT_YAS_ACCELEROMETER
+	default "4"
+	help
+		Chip mounting position (pin 1).
+			0: top, upper-left
+			1: top, upper-right
+			2: top, lower-right
+			3: top, lower-left
+			4: bottom, upper-left
+			5: bottom, upper-right
+			6: bottom, lower-right
+			7: bottom, lower-left
+
+config INPUT_ML610Q793_ACCELEROMETER_POSITION
+	int "ML610Q793 Acceleration Sensor Mounting Position on Board"
+	depends on INPUT_ML610Q793_ACCELEROMETER
+	default "3"
+	help
+		Chip mounting position (pin 1).
+			0: top, upper-left
+			1: top, upper-right
+			2: top, lower-right
+			3: top, lower-left
+			4: bottom, upper-left
+			5: bottom, upper-right
+			6: bottom, lower-right
+			7: bottom, lower-left
+
+config INPUT_ML610Q793_INTERFACE
+	int "ML610Q793 Interface"
+	depends on INPUT_ML610Q793_ACCELEROMETER
+	default "1"
+	help
+		0: I2C
+		1: SPI
+
+config INPUT_YAS_MAGNETOMETER
+	tristate "YAS Geomagnetic Sensor"
+	depends on I2C
+	default y
+
+
+config INPUT_YAS_MAGNETOMETER_POSITION
+	int "YAS Geomagnetic Sensor Mounting Position on Board"
+	depends on INPUT_YAS_MAGNETOMETER
+	default "7"
+	help
+		Chip mounting position (pin 1).
+			0: top, upper-left
+			1: top, upper-right
+			2: top, lower-right
+			3: top, lower-left
+			4: bottom, upper-left
+			5: bottom, upper-right
+			6: bottom, lower-right
+			7: bottom, lower-left
+
+config INPUT_YAS_GYROSCOPE
+	tristate "YAS Gyroscope Sensor"
+	default y
+
+config INPUT_YAS_GYROSCOPE_POSITION
+	int "YAS Gyroscope Sensor Mounting Position on Board"
+	depends on INPUT_YAS_GYROSCOPE
+	default "4"
+	help
+		Chip mounting position (pin 1).
+		0: top, upper-left
+		1: top, upper-right
+		2: top, lower-right
+		3: top, lower-left
+		4: bottom, upper-left
+		5: bottom, upper-right
+		6: bottom, lower-right
+		7: bottom, lower-left
+
+config INPUT_YAS_GYROSCOPE_INTERRUPT
+	bool "Gyroscope Interrupt support"
+	default n
+	depends on INPUT_YAS_GYROSCOPE
+
+config INPUT_YAS_GYROSCOPE_INTERFACE
+	int "Gyroscope Digital Interface"
+	depends on INPUT_YAS_GYROSCOPE
+	default "0"
+	help
+		0: I2C
+		1: SPI
+
+config INPUT_YAS_ORIENTATION
+	tristate "YAS Orientation Sensor"
+	depends on I2C
+	default y
+
+config INPUT_YAS_PRESSURE
+	tristate "YAS Pressure Sensor"
+
+config INPUT_YAS_TEMPERATURE
+	tristate "YAS Temperature Sensor"
+
+config INPUT_YAS_RELATIVE_HUMIDITY
+	tristate "YAS Relative Humidity Sensor"
+
+config INPUT_YAS_AMBIENT_TEMPERATURE
+	tristate "YAS Ambient Temperature Sensor"
+
+config INPUT_YAS_GRAVITY
+	tristate "YAS Gravity Sensor"
+	default y
+
+config INPUT_YAS_LINEAR_ACCELERATION
+	tristate "YAS Linear Acceleration Sensor"
+	default y
+
+config INPUT_YAS_ROTATION_VECTOR
+	tristate "YAS Rotation Vector Sensor"
+	default y
+
+config INPUT_YAS_SOFTWARE_GYROSCOPE
+	tristate "YAS Software Gyroscope Sensor"
+
+config INPUT_SENSOR_APDS990X
+	tristate "APDS990X Proximity/Light Sensor Driver"
+	default n
+	help
+		Support APDS990X Proximity/Light Sensor Driver.
+
+config INPUT_SENSOR_GP2AP020
+	tristate "GP2AP020 Proximity/Light Sensor Driver"
+	default y
+	help
+		Support GP2AP020 Proximity/Light Sensor Driver.
+
+config SENSOR_POWER
+	tristate "Sensor Power Driver"
+	default y
+	help
+		Support Sensor Power Driver.
+

@@ -40,6 +40,7 @@
 #include "mipi_dsi.h"
 #include "mdp.h"
 #include "mdp4.h"
+#include "disp_ext.h"
 
 static struct completion dsi_dma_comp;
 static struct completion dsi_mdp_comp;
@@ -1162,6 +1163,12 @@ int mipi_dsi_cmds_tx(struct dsi_buf *tp, struct dsi_cmd_desc *cmds, int cnt)
 	uint32 dsi_ctrl, ctrl;
 	int i, video_mode;
 
+#ifdef CONFIG_DISP_EXT_BOARD
+	if(disp_ext_board_get_panel_detect() == -1) {
+		return 1;
+	}
+#endif /* CONFIG_DISP_EXT_BOARD */
+
 	/* turn on cmd mode
 	* for video mode, do not send cmds more than
 	* one pixel line, since it only transmit it
@@ -1274,6 +1281,12 @@ int mipi_dsi_cmds_rx(struct msm_fb_data_type *mfd,
 {
 	int cnt, len, diff, pkt_size;
 	char cmd;
+
+#ifdef CONFIG_DISP_EXT_BOARD
+	if(disp_ext_board_get_panel_detect() == -1) {
+		return 1;
+	}
+#endif /* CONFIG_DISP_EXT_BOARD */
 
 	if (mfd->panel_info.mipi.no_max_pkt_size) {
 		/* Only support rlen = 4*n */
@@ -1530,6 +1543,10 @@ int mipi_dsi_cmd_dma_tx(struct dsi_buf *tp)
 
 	if (!wait_for_completion_timeout(&dsi_dma_comp,
 					msecs_to_jiffies(200))) {
+#ifdef CONFIG_DISP_EXT_DIAG
+		disp_ext_util_crc_countup();
+#endif /* CONFIG_DISP_EXT_DIAG */
+
 		pr_err("%s: dma timeout error\n", __func__);
 	}
 
@@ -1849,9 +1866,9 @@ irqreturn_t mipi_dsi_isr(int irq, void *ptr)
 	if (isr & DSI_INTR_CMD_DMA_DONE) {
 		mipi_dsi_mdp_stat_inc(STAT_DSI_CMD);
 		spin_lock(&dsi_mdp_lock);
-		complete(&dsi_dma_comp);
 		dsi_ctrl_lock = FALSE;
 		mipi_dsi_disable_irq_nosync(DSI_CMD_TERM);
+		complete(&dsi_dma_comp);
 		spin_unlock(&dsi_mdp_lock);
 	}
 

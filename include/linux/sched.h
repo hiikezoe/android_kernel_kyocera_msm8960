@@ -292,6 +292,7 @@ static inline void show_state(void)
 }
 
 extern void show_regs(struct pt_regs *);
+extern void show_regs_user_fault(struct pt_regs *);
 
 /*
  * TASK is a pointer to the task whose backtrace we want to see (or NULL for current
